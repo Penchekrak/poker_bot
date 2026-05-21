@@ -7,6 +7,7 @@ Texas Hold'em mini-game.
 
 - `/aces_please` deals a random hand and shows cached preflop equity.
 - `/heads_up @username` starts a two-player in-chat Hold'em table.
+- `/blackjack` starts a one-player blackjack table. Each chat can have one active blackjack table.
 - Mentioning the bot in a group triggers the same random-hand response.
 
 ## Requirements

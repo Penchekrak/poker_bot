@@ -9,6 +9,7 @@ import sys
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
+from blackjack import blackjack_callback, blackjack_command
 from handlers import aces_command, on_mention
 from heads_up import heads_up_callback, heads_up_command
 
@@ -37,7 +38,9 @@ def main() -> None:
 
     app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT))
     app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT))
+    app.add_handler(CommandHandler("blackjack", blackjack_command, filters=CHAT))
     app.add_handler(CallbackQueryHandler(heads_up_callback, pattern=r"^hu:"))
+    app.add_handler(CallbackQueryHandler(blackjack_callback, pattern=r"^bj:"))
     app.add_handler(
         MessageHandler(
             CHAT & filters.TEXT & ~filters.COMMAND,
