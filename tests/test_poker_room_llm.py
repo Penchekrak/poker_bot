@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
@@ -7,6 +8,10 @@ from unittest.mock import patch
 
 import poker_room
 import poker_room_llm
+
+
+def _run(awaitable):
+    return asyncio.get_event_loop().run_until_complete(awaitable) if False else asyncio.run(awaitable)
 
 
 class PokerRoomLlmTests(unittest.TestCase):
@@ -47,19 +52,19 @@ class PokerRoomLlmTests(unittest.TestCase):
         hand = self.make_hand()
 
         self.assertEqual(
-            poker_room_llm.parse_with_fallback("fold", hand, client=None).action,
+            _run(poker_room_llm.parse_with_fallback("fold", hand, client=None)).action,
             poker_room.PlayerAction("fold"),
         )
         self.assertEqual(
-            poker_room_llm.parse_with_fallback("all in", hand, client=None).action,
+            _run(poker_room_llm.parse_with_fallback("all in", hand, client=None)).action,
             poker_room.PlayerAction("all_in"),
         )
         self.assertEqual(
-            poker_room_llm.parse_with_fallback("raise to 500", hand, client=None).action,
+            _run(poker_room_llm.parse_with_fallback("raise to 500", hand, client=None)).action,
             poker_room.PlayerAction("raise_to", 500),
         )
         self.assertEqual(
-            poker_room_llm.parse_with_fallback("raise 500", hand, client=None).action,
+            _run(poker_room_llm.parse_with_fallback("raise 500", hand, client=None)).action,
             poker_room.PlayerAction("raise_ambiguous", 500),
         )
 
@@ -73,7 +78,7 @@ class PokerRoomLlmTests(unittest.TestCase):
                 return {"kind": "poker_action", "action": "call", "confidence": 0.91}
 
         client = FakeClient()
-        parsed = poker_room_llm.parse_with_fallback("ладно доставлю", hand, client=client)
+        parsed = _run(poker_room_llm.parse_with_fallback("ладно доставлю", hand, client=client))
 
         self.assertEqual(parsed.kind, "poker_action")
         self.assertEqual(parsed.action, poker_room.PlayerAction("call"))
@@ -96,12 +101,12 @@ class PokerRoomLlmTests(unittest.TestCase):
                 }
 
         client = FakeClient()
-        parsed = poker_room_llm.parse_room_intent_with_fallback(
+        parsed = _run(poker_room_llm.parse_room_intent_with_fallback(
             "я бы присел к вам за стол",
             room,
             client=client,
             recent_public_messages=[("Bob", "садись")],
-        )
+        ))
 
         self.assertEqual(parsed.kind, "room_intent")
         self.assertEqual(parsed.room_intent, poker_room.ROOM_JOIN)
@@ -116,7 +121,7 @@ class PokerRoomLlmTests(unittest.TestCase):
             def complete_json(self, payload, tools=None, tool_choice=None):
                 raise AssertionError("exact room commands should not call LLM")
 
-        parsed = poker_room_llm.parse_room_intent_with_fallback("сяду", room, client=FailingClient())
+        parsed = _run(poker_room_llm.parse_room_intent_with_fallback("сяду", room, client=FailingClient()))
 
         self.assertEqual(parsed.kind, "room_intent")
         self.assertEqual(parsed.room_intent, poker_room.ROOM_JOIN)
@@ -149,7 +154,7 @@ class PokerRoomLlmTests(unittest.TestCase):
             def complete_json(self, payload):
                 return {"kind": "poker_action", "action": "teleport_chips"}
 
-        parsed = poker_room_llm.parse_with_fallback("call", hand, client=BrokenClient())
+        parsed = _run(poker_room_llm.parse_with_fallback("call", hand, client=BrokenClient()))
 
         self.assertEqual(parsed.kind, "poker_action")
         self.assertEqual(parsed.action, poker_room.PlayerAction("call"))
@@ -192,10 +197,29 @@ class PokerRoomLlmTests(unittest.TestCase):
                 return {"commentary": ""}
 
         good = GoodClient()
-        self.assertIn("Дилер посмотрел", poker_room_llm.generate_dealer_commentary("flop", hand, client=good))
+        self.assertIn("Дилер посмотрел", _run(poker_room_llm.generate_dealer_commentary("flop", hand, client=good)))
         self.assertEqual(good.tools[0]["function"]["name"], "submit_dealer_commentary")
-        self.assertIn("другим ключом", poker_room_llm.generate_dealer_commentary("flop", hand, client=ResponseClient()))
-        self.assertIn("Дилер", poker_room_llm.generate_dealer_commentary("flop", hand, client=BadClient()))
+        self.assertIn("другим ключом", _run(poker_room_llm.generate_dealer_commentary("flop", hand, client=ResponseClient())))
+        self.assertIn("Дилер", _run(poker_room_llm.generate_dealer_commentary("flop", hand, client=BadClient())))
+
+    def test_async_client_is_awaited_when_present(self) -> None:
+        hand = self.make_hand()
+        calls: dict[str, list] = {"async": [], "sync": []}
+
+        class AsyncClient:
+            async def complete_json_async(self, payload, tools=None, tool_choice=None):
+                calls["async"].append((tools, tool_choice))
+                return {"kind": "poker_action", "action": "fold", "confidence": 0.9}
+
+            def complete_json(self, payload, tools=None, tool_choice=None):
+                calls["sync"].append((tools, tool_choice))
+                raise AssertionError("sync path should not be used when async is available")
+
+        parsed = _run(poker_room_llm.parse_with_fallback("сброс", hand, client=AsyncClient()))
+
+        self.assertEqual(parsed.action, poker_room.PlayerAction("fold"))
+        self.assertEqual(len(calls["async"]), 1)
+        self.assertEqual(calls["sync"], [])
 
 
 if __name__ == "__main__":

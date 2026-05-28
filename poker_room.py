@@ -106,6 +106,7 @@ class HandPlayer:
     name: str
     hand: tuple[str, str]
     stack: int
+    initial_stack: int = 0
     committed: int = 0
     street_bet: int = 0
     folded: bool = False
@@ -118,6 +119,41 @@ class SidePot:
     amount: int
     eligible_user_ids: list[int]
     winner_user_ids: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PotResolution:
+    """Public outcome of one (side) pot."""
+
+    label: str
+    amount: int
+    winner_user_ids: tuple[int, ...]
+    winner_names: tuple[str, ...]
+    hand_category: str | None
+
+
+@dataclass(frozen=True)
+class HandResolution:
+    """Aggregate outcome of a finished hand: pot results, board, and per-player chip deltas."""
+
+    pots: tuple[PotResolution, ...]
+    board: tuple[str, ...]
+    stack_deltas: tuple[tuple[int, int], ...]
+    showdown: bool
+
+
+HAND_CATEGORY_RU: Final[dict[str, str]] = {
+    "High Card": "Старшая карта",
+    "Pair": "Пара",
+    "Two Pair": "Две пары",
+    "Three of a Kind": "Сет",
+    "Straight": "Стрит",
+    "Flush": "Флеш",
+    "Full House": "Фулл-хаус",
+    "Four of a Kind": "Каре",
+    "Straight Flush": "Стрит-флеш",
+    "Royal Flush": "Роял-флеш",
+}
 
 
 @dataclass
@@ -147,6 +183,8 @@ class PokerRoom:
             seat = self._require_seat(user_id)
             seat.leave_next_hand = True
             seat.sitting_out = True
+            if self.current_hand is None or self.current_hand.status == STATUS_ENDED:
+                self._remove_left_seats()
             return GameResult("room", "Выход из-за стола принят.")
         if intent == ROOM_REBUY:
             seat = self._require_seat(user_id)
@@ -190,6 +228,7 @@ class PokerRoom:
                 name=seat.name,
                 hand=hand,
                 stack=seat.stack,
+                initial_stack=seat.stack,
             )
 
         created_at = _coerce_now(now)
@@ -298,6 +337,7 @@ class PokerHand:
     mucked_user_ids: set[int] = field(default_factory=set)
     side_pots: list[SidePot] = field(default_factory=list)
     public_log: list[str] = field(default_factory=list)
+    final_announced: bool = False
 
     @property
     def pot(self) -> int:
@@ -433,6 +473,80 @@ class PokerHand:
         eligible = {user_id for user_id, player in self.players.items() if not player.folded}
         decided = self.public_revealed_user_ids | self.mucked_user_ids
         return eligible - decided
+
+    def resolution_summary(self) -> HandResolution:
+        """Return the public resolution of a finished hand for chat-side rendering.
+
+        For showdowns this enumerates each side pot, names its winners and the rank class
+        of the winning hand. For folded endings the pot has no hand category. Always
+        includes per-player chip deltas relative to the stacks at hand start.
+        """
+
+        if self.status != STATUS_ENDED:
+            raise PokerRoomError("hand not finished")
+        stack_deltas: list[tuple[int, int]] = [
+            (player.user_id, player.stack - player.initial_stack)
+            for player in (self.players[user_id] for user_id in self.order)
+        ]
+        if self.side_pots:
+            pots: list[PotResolution] = []
+            multi = len(self.side_pots) > 1
+            for index, pot in enumerate(self.side_pots):
+                winners = pot.winner_user_ids or self._winners_for(pot.eligible_user_ids)
+                names = tuple(self.players[user_id].name for user_id in winners)
+                category = self._hand_category_for(winners[0]) if winners else None
+                label = self._pot_label(index, multi)
+                pots.append(
+                    PotResolution(
+                        label=label,
+                        amount=pot.amount,
+                        winner_user_ids=tuple(winners),
+                        winner_names=names,
+                        hand_category=category,
+                    )
+                )
+            return HandResolution(
+                pots=tuple(pots),
+                board=tuple(self.board),
+                stack_deltas=tuple(stack_deltas),
+                showdown=True,
+            )
+        live = [player for player in self.players.values() if not player.folded]
+        winners = [live[0].user_id] if live else []
+        names = tuple(self.players[user_id].name for user_id in winners)
+        return HandResolution(
+            pots=(
+                PotResolution(
+                    label="Банк",
+                    amount=sum(player.committed for player in self.players.values()),
+                    winner_user_ids=tuple(winners),
+                    winner_names=names,
+                    hand_category=None,
+                ),
+            ),
+            board=tuple(self.board),
+            stack_deltas=tuple(stack_deltas),
+            showdown=False,
+        )
+
+    def _pot_label(self, index: int, multi: bool) -> str:
+        if not multi:
+            return "Банк"
+        if index == 0:
+            return "Основной банк"
+        return f"Сайд-пот {index}"
+
+    def _hand_category_for(self, user_id: int) -> str | None:
+        player = self.players.get(user_id)
+        if player is None or len(self.board) < 5:
+            return None
+        try:
+            score = _EVALUATOR.evaluate([Card.new(c) for c in player.hand], [Card.new(c) for c in self.board])
+            rank_class = _EVALUATOR.get_rank_class(score)
+            label = _EVALUATOR.class_to_string(rank_class)
+        except Exception:
+            return None
+        return HAND_CATEGORY_RU.get(label, label)
 
     def public_snapshot(self) -> dict[str, object]:
         return {
@@ -577,7 +691,8 @@ class PokerHand:
     def _showdown(self, now: float | None) -> None:
         self.side_pots = self._build_side_pots()
         for pot in self.side_pots:
-            pot.winner_user_ids = self._winners_for(pot.eligible_user_ids)
+            winners = self._winners_for(pot.eligible_user_ids)
+            pot.winner_user_ids = self._order_winners_by_seat(winners)
             share, odd = divmod(pot.amount, len(pot.winner_user_ids))
             for index, user_id in enumerate(pot.winner_user_ids):
                 payout = share + (1 if index < odd else 0)
@@ -618,6 +733,20 @@ class PokerHand:
         ranked = [(user_id, _evaluate(self.players[user_id].hand, self.board)) for user_id in user_ids]
         best = min(score for _, score in ranked)
         return [user_id for user_id, score in ranked if score == best]
+
+    def _order_winners_by_seat(self, winners: list[int]) -> list[int]:
+        """Sort winners by position starting from the seat after the button.
+
+        This gives the leftover odd chip a stable, traditional resolution
+        (first-after-the-button rule) instead of relying on dict iteration order.
+        """
+
+        if not winners or self.button_user_id is None or self.button_user_id not in self.order:
+            return sorted(winners, key=self.order.index)
+        button_index = self.order.index(self.button_user_id)
+        rotated = [self.order[(button_index + 1 + offset) % len(self.order)] for offset in range(len(self.order))]
+        winner_set = set(winners)
+        return [user_id for user_id in rotated if user_id in winner_set]
 
     def _pay_to_seat(self, user_id: int, amount: int) -> None:
         self.players[user_id].stack += amount
@@ -719,6 +848,12 @@ class JsonRoomStore:
     def save_public_dict(self, data: dict[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+        if self.path.exists():
+            backup_path = self.path.with_suffix(self.path.suffix + ".bak")
+            try:
+                backup_path.write_bytes(self.path.read_bytes())
+            except OSError:
+                pass
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
             tmp.write(payload)
             tmp.write("\n")

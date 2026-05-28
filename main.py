@@ -10,10 +10,17 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
+import poker_room_handlers
 from blackjack import blackjack_callback, blackjack_command
 from handlers import aces_command, on_mention
 from heads_up import heads_up_callback, heads_up_command
-from poker_room_handlers import poker_room_callback, poker_room_command, poker_room_message, room_callback_pattern
+from poker_room_handlers import (
+    poker_room_callback,
+    poker_room_command,
+    poker_room_message,
+    poker_room_startup,
+    room_callback_pattern,
+)
 
 log = logging.getLogger(__name__)
 
@@ -93,20 +100,73 @@ def build_application(token: str):
     app = (
         Application.builder()
         .token(token)
+        .post_init(poker_room_startup)
         .build()
     )
     register_handlers(app)
     return app
 
 
+def build_not_in_poker_room_filter(config) -> "filters.MessageFilter":
+    """Filter that returns True iff the message is outside the configured poker chat/thread."""
+
+    class _NotInPokerRoom(filters.MessageFilter):
+        def filter(self, message) -> bool:
+            if config is None:
+                return True
+            chat = getattr(message, "chat", None)
+            chat_id = getattr(chat, "id", None) if chat is not None else getattr(message, "chat_id", None)
+            if chat_id != config.chat_id:
+                return True
+            if config.thread_id is None:
+                return False
+            return getattr(message, "message_thread_id", None) != config.thread_id
+
+    return _NotInPokerRoom()
+
+
+def _wrap_callback_outside_poker_room(handler, config):
+    """Short-circuit a callback handler when the click happens inside the poker chat/thread."""
+
+    async def gated(update: Update, context) -> None:
+        if _callback_is_in_poker_room(update, config):
+            return
+        await handler(update, context)
+
+    return gated
+
+
+def _callback_is_in_poker_room(update: Update, config) -> bool:
+    if config is None:
+        return False
+    query = update.callback_query
+    if query is None:
+        return False
+    message = query.message
+    if message is None:
+        return False
+    if getattr(message, "chat_id", None) != config.chat_id:
+        return False
+    if config.thread_id is None:
+        return True
+    return getattr(message, "message_thread_id", None) == config.thread_id
+
+
 def register_handlers(app) -> None:
+    poker_config = poker_room_handlers.RoomConfig.from_env()
+    not_in_poker_room = build_not_in_poker_room_filter(poker_config)
+
     app.add_handler(TypeHandler(Update, log_update), group=-100)
-    app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT))
-    app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT))
-    app.add_handler(CommandHandler("blackjack", blackjack_command, filters=CHAT))
+    app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT & not_in_poker_room))
+    app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT & not_in_poker_room))
+    app.add_handler(CommandHandler("blackjack", blackjack_command, filters=CHAT & not_in_poker_room))
     app.add_handler(CommandHandler("poker", poker_room_command, filters=CHAT))
-    app.add_handler(CallbackQueryHandler(heads_up_callback, pattern=r"^hu:"))
-    app.add_handler(CallbackQueryHandler(blackjack_callback, pattern=r"^bj:"))
+    app.add_handler(
+        CallbackQueryHandler(_wrap_callback_outside_poker_room(heads_up_callback, poker_config), pattern=r"^hu:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(_wrap_callback_outside_poker_room(blackjack_callback, poker_config), pattern=r"^bj:")
+    )
     app.add_handler(CallbackQueryHandler(poker_room_callback, pattern=room_callback_pattern()))
     app.add_handler(
         MessageHandler(
@@ -117,7 +177,7 @@ def register_handlers(app) -> None:
     )
     app.add_handler(
         MessageHandler(
-            CHAT & filters.TEXT & ~filters.COMMAND,
+            CHAT & filters.TEXT & ~filters.COMMAND & not_in_poker_room,
             on_mention,
         )
     )

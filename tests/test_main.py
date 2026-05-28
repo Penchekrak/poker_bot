@@ -43,6 +43,43 @@ class FakeUpdate:
         }
 
 
+class PokerRoomIsolationFilterTests(unittest.TestCase):
+    def _config(self, chat_id: int = -1003989263256, thread_id: int | None = 77):
+        import poker_room_handlers
+
+        return poker_room_handlers.RoomConfig(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            admin_user_ids={1},
+            state_path=Path("/tmp/poker-room-state.json"),
+        )
+
+    def _message(self, chat_id: int, thread_id: int | None):
+        msg = type("Msg", (), {})()
+        msg.chat = type("Chat", (), {"id": chat_id})()
+        msg.chat_id = chat_id
+        msg.message_thread_id = thread_id
+        return msg
+
+    def test_filter_is_inert_when_config_is_none(self) -> None:
+        flt = main.build_not_in_poker_room_filter(None)
+        self.assertTrue(flt.filter(self._message(-12345, None)))
+
+    def test_filter_allows_other_chats_and_topics_when_thread_is_set(self) -> None:
+        flt = main.build_not_in_poker_room_filter(self._config(chat_id=-1, thread_id=10))
+        self.assertTrue(flt.filter(self._message(-2, None)))
+        self.assertTrue(flt.filter(self._message(-1, 11)))
+
+    def test_filter_blocks_messages_inside_configured_chat_and_thread(self) -> None:
+        flt = main.build_not_in_poker_room_filter(self._config(chat_id=-1, thread_id=10))
+        self.assertFalse(flt.filter(self._message(-1, 10)))
+
+    def test_filter_blocks_all_threads_when_thread_id_is_none(self) -> None:
+        flt = main.build_not_in_poker_room_filter(self._config(chat_id=-1, thread_id=None))
+        self.assertFalse(flt.filter(self._message(-1, 0)))
+        self.assertFalse(flt.filter(self._message(-1, 99)))
+
+
 class MainLoggingTests(unittest.TestCase):
     def test_update_summary_includes_chat_user_and_text(self) -> None:
         summary = main.update_summary(FakeUpdate())

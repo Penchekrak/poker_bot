@@ -6,6 +6,7 @@ import html
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,21 @@ JOB_MISFIRE_GRACE_SECONDS = 60
 ADMIN_OPEN = "open"
 ADMIN_CLOSE = "close"
 ADMIN_RESET = "reset"
+RENDER_KEEP_SECONDS = 600
+NUDGE_COOLDOWN_SECONDS = 5.0
+
+ENGINE_ERROR_RU: dict[str, str] = {
+    "check is not legal facing a bet": "Сейчас нельзя чек: есть бет, нужен колл или фолд.",
+    "bet is not legal facing a bet": "Уже сделана ставка, используй рейз.",
+    "amount required": "Укажи размер ставки числом.",
+    "amount must be positive": "Размер ставки должен быть больше нуля.",
+    "raise amount is not legal": "Такой рейз не разрешён правилами.",
+    "target is not legal": "Такой размер не разрешён правилами.",
+    "not your turn": "Сейчас не твой ход.",
+    "player cannot act": "Сейчас тебе не нужно ходить.",
+    "hand is not betting": "Раздача уже завершена.",
+    "unknown action": "Не понял действие.",
+}
 
 
 @dataclass(frozen=True)
@@ -57,9 +73,11 @@ class RoomConfig:
 
 
 def reset_room_for_tests() -> None:
-    """Clear cached room globals from tests that reuse module state."""
-    # Runtime state is held in context.bot_data. This hook exists for symmetry with
-    # the older game modules and for future module-level caches.
+    """Compatibility shim for tests; the live room state lives in ``context.bot_data``.
+
+    There are no module-level caches to clear, but we keep this function so callers
+    can mirror the reset pattern used by other game modules.
+    """
 
 
 def get_room(context) -> poker_room.PokerRoom:
@@ -123,7 +141,7 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if hand and hand.status == poker_room.STATUS_BETTING and hand.to_act_user_id == user.id:
-        parsed = poker_room_llm.parse_with_fallback(
+        parsed = await poker_room_llm.parse_with_fallback(
             message.text,
             hand,
             recent_public_messages=context.bot_data.get("poker_room_recent_messages", []),
@@ -132,7 +150,7 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 result = hand.apply_action(user.id, parsed.action)
             except poker_room.PokerActionError as exc:
-                await message.reply_text(str(exc))
+                await message.reply_text(_translate_engine_error(exc))
                 return
             await _confirm_reaction(message)
             if hand.status == poker_room.STATUS_ENDED:
@@ -144,10 +162,11 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 _schedule_turn_timeout(context, hand)
             return
-        await message.reply_text(_turn_prompt(hand), parse_mode=ParseMode.HTML)
+        if _should_send_turn_nudge(context, hand, user.id):
+            await message.reply_text(_turn_prompt(hand), parse_mode=ParseMode.HTML)
         return
 
-    parsed_room = poker_room_llm.parse_room_intent_with_fallback(
+    parsed_room = await poker_room_llm.parse_room_intent_with_fallback(
         message.text,
         room,
         recent_public_messages=context.bot_data.get("poker_room_recent_messages", []),
@@ -205,7 +224,11 @@ async def poker_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _answer_callback(query, "Раздачи нет.", show_alert=True)
             return
         if len(parts) != 3 or parts[2] != hand.hand_id:
-            await _answer_callback(query, "Кнопка устарела.", show_alert=True)
+            await _answer_callback(
+                query,
+                "Кнопка устарела. Жми «Мои карты» на новой раздаче.",
+                show_alert=True,
+            )
             return
         if user.id not in hand.players:
             await _answer_callback(query, "Ты не в текущей раздаче.", show_alert=True)
@@ -260,11 +283,27 @@ async def poker_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _answer_callback(query, "Раздачи нет.")
             return
         if parts[2] != hand.hand_id:
-            await _answer_callback(query, "Кнопка устарела.", show_alert=True)
+            await _answer_callback(query, "Кнопка устарела. Кнопки от прошлой раздачи уже не работают.", show_alert=True)
             return
         result = hand.choose_public_reveal(user.id, reveal=parts[3] == "1")
         await _answer_callback(query, result.text)
         await _render_room(context, hand, force_new=False)
+        return
+
+    if parts[1] == "cancel" and len(parts) == 4:
+        try:
+            expected_user_id = int(parts[3])
+        except ValueError:
+            await _answer_callback(query, "Кнопка сломалась.")
+            return
+        if expected_user_id != user.id:
+            await _answer_callback(query, "Это не твоя кнопка.", show_alert=True)
+            return
+        try:
+            await query.edit_message_text("Отменено.")
+        except Exception:
+            log.info("Could not edit cancelled confirmation message", exc_info=True)
+        await _answer_callback(query, "Отменено.")
         return
 
     await _answer_callback(query, "Не понял кнопку.")
@@ -385,13 +424,31 @@ def _admin_intent_from_text(text: str) -> str | None:
 
 def _confirmation_markup(intent: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Подтвердить", callback_data=f"{CALLBACK_PREFIX}:confirm:{intent}:{user_id}")]]
+        [
+            [
+                InlineKeyboardButton(
+                    "Подтвердить", callback_data=f"{CALLBACK_PREFIX}:confirm:{intent}:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "Отмена", callback_data=f"{CALLBACK_PREFIX}:cancel:{intent}:{user_id}"
+                ),
+            ]
+        ]
     )
 
 
 def _admin_confirmation_markup(intent: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Подтвердить", callback_data=f"{CALLBACK_PREFIX}:admin:{intent}:{user_id}")]]
+        [
+            [
+                InlineKeyboardButton(
+                    "Подтвердить", callback_data=f"{CALLBACK_PREFIX}:admin:{intent}:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "Отмена", callback_data=f"{CALLBACK_PREFIX}:cancel:admin_{intent}:{user_id}"
+                ),
+            ]
+        ]
     )
 
 
@@ -464,11 +521,12 @@ async def _render_room(context, hand: poker_room.PokerHand, force_new: bool) -> 
     if config is None:
         return False
     config.render_dir.mkdir(parents=True, exist_ok=True)
-    path = config.render_dir / f"poker-room-{int(hand.updated_at)}-{len(hand.board)}.png"
+    _purge_old_renders(config.render_dir)
+    path = config.render_dir / f"poker-room-{hand.hand_id}-{len(hand.board)}-{int(hand.updated_at)}.png"
     poker_room_render.render_table_png(hand, path)
     commentary = ""
     if force_new or hand.status == poker_room.STATUS_ENDED:
-        commentary = poker_room_llm.generate_dealer_commentary(
+        commentary = await poker_room_llm.generate_dealer_commentary(
             hand.street,
             hand,
             recent_public_messages=context.bot_data.get("poker_room_recent_messages", []),
@@ -566,7 +624,7 @@ async def _confirm_reaction(message) -> None:
     if setter is None:
         return
     try:
-        await setter("👌")
+        await setter("👍")
     except Exception:
         log.info("Could not set poker action reaction", exc_info=True)
 
@@ -585,33 +643,64 @@ async def _send_final_message(context, hand: poker_room.PokerHand, result: poker
     config = _config(context)
     if config is None:
         return
-    key = f"{hand.created_at}:{hand.updated_at}:{result.kind}"
-    if context.bot_data.get("poker_room_final_message_key") == key:
+    if hand.final_announced:
         return
-    lines = ["Раздача окончена."]
-    if result.text:
-        lines.append(html.escape(result.text))
-    if hand.public_log:
-        lines.append(html.escape(hand.public_log[-1]))
-    stacks = ", ".join(
-        f"{html.escape(hand.room.seats[user_id].name)}: {hand.room.seats[user_id].stack}" for user_id in hand.order
-    )
-    if stacks:
-        lines.append(f"Стэки: {stacks}")
-    if _room_ready_for_auto_deal(hand.room):
-        lines.append(f"Новая раздача через {int(poker_room.AUTO_DEAL_SECONDS)} секунд.")
+    try:
+        resolution = hand.resolution_summary()
+    except poker_room.PokerRoomError:
+        log.warning("Final message requested before hand ended; skipping")
+        return
+
+    text = _format_final_message(hand, resolution)
+
     send_kwargs = {
         "chat_id": config.chat_id,
-        "text": "\n".join(lines),
+        "text": text,
         "parse_mode": ParseMode.HTML,
     }
     if config.thread_id is not None:
         send_kwargs["message_thread_id"] = config.thread_id
     try:
         await context.bot.send_message(**send_kwargs)
-        context.bot_data["poker_room_final_message_key"] = key
+        hand.final_announced = True
     except Exception:
         log.exception("Failed to send poker final message")
+
+
+def _format_final_message(hand: poker_room.PokerHand, resolution: poker_room.HandResolution) -> str:
+    lines: list[str] = ["<b>Раздача окончена.</b>"]
+    for pot in resolution.pots:
+        names_html = ", ".join(f"<b>{html.escape(name)}</b>" for name in pot.winner_names) or "—"
+        if resolution.showdown:
+            category = f" — {html.escape(pot.hand_category)}" if pot.hand_category else ""
+            lines.append(f"{html.escape(pot.label)}: {names_html} забирает {pot.amount}{category}")
+        else:
+            lines.append(f"{names_html} забирает банк {pot.amount} без вскрытия")
+    if resolution.showdown and resolution.board:
+        board_html = " ".join(html.escape(_format_card_text(card)) for card in resolution.board)
+        lines.append(f"Доска: {board_html}")
+    delta_parts: list[str] = []
+    for user_id, delta in resolution.stack_deltas:
+        seat = hand.room.seats.get(user_id)
+        if seat is None:
+            continue
+        sign = f"+{delta}" if delta > 0 else str(delta)
+        delta_parts.append(f"{html.escape(seat.name)} {seat.stack} ({sign})")
+    if delta_parts:
+        lines.append("Стек: " + ", ".join(delta_parts))
+    if _room_ready_for_auto_deal(hand.room):
+        lines.append(f"Новая раздача через {int(poker_room.AUTO_DEAL_SECONDS)} секунд.")
+    return "\n".join(lines)
+
+
+_SUIT_TO_UNICODE = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
+
+
+def _format_card_text(card: str) -> str:
+    if len(card) != 2:
+        return card
+    rank, suit = card[0], card[1]
+    return f"{rank}{_SUIT_TO_UNICODE.get(suit, suit)}"
 
 
 def _turn_prompt(hand: poker_room.PokerHand) -> str:
@@ -621,7 +710,7 @@ def _turn_prompt(hand: poker_room.PokerHand) -> str:
     actor = hand.players[actor_id]
     mention = _seat_mention(hand.room.seats.get(actor_id), actor_id, actor.name)
     legal = hand.legal_summary(actor_id)
-    options = ["фолд"]
+    options: list[str] = ["фолд"]
     if legal.get("can_check"):
         options.append("чек")
     elif legal.get("call_amount"):
@@ -629,7 +718,26 @@ def _turn_prompt(hand: poker_room.PokerHand) -> str:
     if legal.get("min_raise_to"):
         options.append(f"рейз до {legal['min_raise_to']}+")
     options.append("олл-ин")
-    return f"Пожалуйста, {mention}, твой ход: {html.escape(', '.join(options))}."
+    suffix = ""
+    call_amount = int(legal.get("call_amount") or 0)
+    if call_amount > 0:
+        pot = hand.pot
+        odds = f", шансы 1 к {pot // call_amount}" if call_amount and pot >= call_amount else ""
+        suffix = f" (банк {pot}, нужно {call_amount}{odds})"
+    return f"Пожалуйста, {mention}, твой ход: {html.escape(', '.join(options))}{html.escape(suffix)}."
+
+
+def _should_send_turn_nudge(context, hand: poker_room.PokerHand, user_id: int) -> bool:
+    key = "poker_room_last_nudge"
+    last = context.bot_data.get(key)
+    now = time.monotonic()
+    fingerprint = (hand.hand_id, hand.to_act_user_id, user_id)
+    if isinstance(last, tuple) and len(last) == 2:
+        prev_fingerprint, prev_at = last
+        if prev_fingerprint == fingerprint and now - prev_at < NUDGE_COOLDOWN_SECONDS:
+            return False
+    context.bot_data[key] = (fingerprint, now)
+    return True
 
 
 def _seat_mention(seat: poker_room.Seat | None, user_id: int, fallback_name: str) -> str:
@@ -701,9 +809,63 @@ def _append_public_message(context, user: str, text: str) -> None:
     context.bot_data["poker_room_recent_messages"] = messages[-10:]
 
 
+def _translate_engine_error(exc: poker_room.PokerActionError) -> str:
+    return ENGINE_ERROR_RU.get(str(exc), "Действие отклонено правилами.")
+
+
 def _display_name(user) -> str:
     if getattr(user, "full_name", None):
         return user.full_name
     if getattr(user, "username", None):
         return f"@{user.username}"
     return str(user.id)
+
+
+def _purge_old_renders(render_dir: Path) -> None:
+    cutoff = time.time() - RENDER_KEEP_SECONDS
+    try:
+        for entry in render_dir.iterdir():
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                try:
+                    entry.unlink()
+                except OSError:
+                    continue
+    except (FileNotFoundError, NotADirectoryError):
+        return
+
+
+async def poker_room_startup(application) -> None:
+    """Initialise the poker room after the application starts.
+
+    Loads persisted state and, if the room is open with enough active players,
+    schedules an auto-deal job. Without this, restarts leave the table dormant
+    until a chat message wakes the bot up.
+    """
+
+    config = RoomConfig.from_env()
+    if config is None:
+        return
+
+    bot_data = application.bot_data
+    bot_data["poker_room_config"] = config
+    room = poker_room.JsonRoomStore(config.state_path).load()
+    bot_data["poker_room"] = room
+
+    job_queue = getattr(application, "job_queue", None)
+    if job_queue is None:
+        return
+    if not _room_ready_for_auto_deal(room):
+        return
+    for job in job_queue.get_jobs_by_name(AUTO_DEAL_JOB_NAME):
+        job.schedule_removal()
+    job_queue.run_once(
+        poker_room_auto_deal_job,
+        poker_room.AUTO_DEAL_SECONDS,
+        name=AUTO_DEAL_JOB_NAME,
+        job_kwargs={"misfire_grace_time": JOB_MISFIRE_GRACE_SECONDS},
+    )
+    log.info(
+        "Poker room startup scheduled auto-deal chat=%s seats=%s",
+        config.chat_id,
+        len(room.seat_order),
+    )

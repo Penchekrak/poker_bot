@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import logging
 import os
 import re
 import urllib.error
@@ -11,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import poker_room
+
+log = logging.getLogger(__name__)
 
 _AMOUNT_RE = re.compile(r"(\d[\d\s_]*)")
 
@@ -48,6 +53,26 @@ class OpenAIJsonClient:
         payload: dict[str, object],
         tools: list[dict[str, object]] | None = None,
         tool_choice: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Synchronous version. Avoid calling from async handlers; prefer ``complete_json_async``."""
+
+        return self._complete_json_sync(payload, tools, tool_choice)
+
+    async def complete_json_async(
+        self,
+        payload: dict[str, object],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Run the blocking HTTP call on a worker thread so the asyncio loop stays responsive."""
+
+        return await asyncio.to_thread(self._complete_json_sync, payload, tools, tool_choice)
+
+    def _complete_json_sync(
+        self,
+        payload: dict[str, object],
+        tools: list[dict[str, object]] | None,
+        tool_choice: dict[str, object] | None,
     ) -> dict[str, object]:
         if not self.configured:
             raise RuntimeError("LLM client is not configured")
@@ -238,7 +263,7 @@ def build_commentary_payload(
     }
 
 
-def generate_dealer_commentary(
+async def generate_dealer_commentary(
     event: str,
     hand: poker_room.PokerHand,
     client: object | None = None,
@@ -249,7 +274,7 @@ def generate_dealer_commentary(
         active_client = client or OpenAIJsonClient()
         if client is None and not active_client.configured:  # type: ignore[attr-defined]
             raise RuntimeError("LLM client is not configured")
-        raw = _complete_json_with_tools(
+        raw = await _complete_json_with_tools_async(
             active_client,
             payload,
             _commentary_tools(),
@@ -260,34 +285,39 @@ def generate_dealer_commentary(
             raise ValueError("empty commentary")
         return commentary[:220]
     except Exception:
+        log.info("Dealer commentary fell back to deterministic", exc_info=True)
         return _fallback_commentary(event)
 
 
-def parse_with_fallback(
+async def parse_with_fallback(
     text: str,
     hand: poker_room.PokerHand,
     client: object | None = None,
     recent_public_messages: list[tuple[str, str]] | None = None,
 ) -> ParsedIntent:
     payload = build_parser_payload(hand, text, recent_public_messages)
-    if client is not None:
+    target_client = client
+    if target_client is None:
+        configured = OpenAIJsonClient()
+        if configured.configured:
+            target_client = configured
+    if target_client is not None:
         try:
-            raw = _complete_json_with_tools(client, payload, _parser_tools(), _tool_choice("submit_poker_intent"))
+            raw = await _complete_json_with_tools_async(
+                target_client,
+                payload,
+                _parser_tools(),
+                _tool_choice("submit_poker_intent"),
+            )
             return _validate_intent(raw)
-        except Exception:
-            pass
-    else:
-        try:
-            configured = OpenAIJsonClient()
-            if configured.configured:
-                raw = configured.complete_json(payload, tools=_parser_tools(), tool_choice=_tool_choice("submit_poker_intent"))
-                return _validate_intent(raw)
         except (RuntimeError, urllib.error.URLError, TimeoutError, ValueError, KeyError):
-            pass
+            log.info("Poker action LLM parse failed; using deterministic fallback", exc_info=True)
+        except Exception:
+            log.info("Poker action LLM parse raised; using deterministic fallback", exc_info=True)
     return deterministic_parse(text)
 
 
-def parse_room_intent_with_fallback(
+async def parse_room_intent_with_fallback(
     text: str,
     room: poker_room.PokerRoom,
     client: object | None = None,
@@ -297,20 +327,24 @@ def parse_room_intent_with_fallback(
     if deterministic.kind != "unknown":
         return deterministic
     payload = build_room_intent_payload(room, text, recent_public_messages)
-    if client is not None:
+    target_client = client
+    if target_client is None:
+        configured = OpenAIJsonClient()
+        if configured.configured:
+            target_client = configured
+    if target_client is not None:
         try:
-            raw = _complete_json_with_tools(client, payload, _room_tools(), _tool_choice("submit_room_intent"))
+            raw = await _complete_json_with_tools_async(
+                target_client,
+                payload,
+                _room_tools(),
+                _tool_choice("submit_room_intent"),
+            )
             return _validate_intent(raw)
-        except Exception:
-            pass
-    else:
-        try:
-            configured = OpenAIJsonClient()
-            if configured.configured:
-                raw = configured.complete_json(payload, tools=_room_tools(), tool_choice=_tool_choice("submit_room_intent"))
-                return _validate_intent(raw)
         except (RuntimeError, urllib.error.URLError, TimeoutError, ValueError, KeyError):
-            pass
+            log.info("Room intent LLM parse failed; using deterministic fallback", exc_info=True)
+        except Exception:
+            log.info("Room intent LLM parse raised; using deterministic fallback", exc_info=True)
     return deterministic_room_intent_parse(text)
 
 
@@ -441,12 +475,45 @@ def _max_tokens_from_env() -> int:
         return 1024
 
 
+async def _complete_json_with_tools_async(
+    client: object,
+    payload: dict[str, object],
+    tools: list[dict[str, object]],
+    tool_choice: dict[str, object],
+) -> dict[str, object]:
+    """Invoke either ``complete_json_async`` or ``complete_json`` on a client.
+
+    Existing test doubles may only implement the synchronous ``complete_json``; we
+    treat them transparently and route them through ``asyncio.to_thread`` so the
+    event loop is never blocked even in tests.
+    """
+
+    async_caller = getattr(client, "complete_json_async", None)
+    if callable(async_caller):
+        try:
+            return await async_caller(payload, tools=tools, tool_choice=tool_choice)
+        except TypeError:
+            return await async_caller(payload)
+    sync_caller = getattr(client, "complete_json", None)
+    if not callable(sync_caller):
+        raise TypeError("LLM client is missing complete_json/complete_json_async")
+    try:
+        result = sync_caller(payload, tools=tools, tool_choice=tool_choice)
+    except TypeError:
+        result = sync_caller(payload)
+    if inspect.isawaitable(result):
+        return await result
+    return await asyncio.to_thread(lambda: result if not callable(result) else result())  # pragma: no cover - safety net
+
+
 def _complete_json_with_tools(
     client: object,
     payload: dict[str, object],
     tools: list[dict[str, object]],
     tool_choice: dict[str, object],
 ) -> dict[str, object]:
+    """Synchronous helper retained for tests that exercise the parser in isolation."""
+
     try:
         return client.complete_json(payload, tools=tools, tool_choice=tool_choice)  # type: ignore[attr-defined]
     except TypeError:

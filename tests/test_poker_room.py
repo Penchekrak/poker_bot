@@ -179,6 +179,92 @@ class PokerRoomEngineTests(unittest.TestCase):
             room.start_hand(now=1_010.0)
 
 
+class HandResolutionTests(unittest.TestCase):
+    def test_fold_resolution_names_the_lone_live_player_without_category(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+        hand = room.start_hand(now=1_010.0)
+        hand.apply_action(hand.to_act_user_id, poker_room.PlayerAction("fold"), now=1_011.0)
+
+        resolution = hand.resolution_summary()
+
+        self.assertFalse(resolution.showdown)
+        self.assertEqual(len(resolution.pots), 1)
+        self.assertEqual(resolution.pots[0].winner_names, ("Bob",))
+        self.assertIsNone(resolution.pots[0].hand_category)
+        winning_delta = dict(resolution.stack_deltas)
+        self.assertGreater(winning_delta[2], 0)
+        self.assertLess(winning_delta[1], 0)
+
+    def test_showdown_resolution_reports_russian_hand_category_and_board(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+        hand = room.start_hand(
+            now=1_010.0,
+            deck=poker_room.stacked_deck(
+                {
+                    1: ("Ah", "Ad"),
+                    2: ("Kh", "Kd"),
+                    "board": ("Tc", "7d", "9h", "3s", "2c"),
+                }
+            ),
+        )
+        hand.apply_action(1, poker_room.PlayerAction("all_in"), now=1_011.0)
+        hand.apply_action(2, poker_room.PlayerAction("call"), now=1_012.0)
+
+        resolution = hand.resolution_summary()
+
+        self.assertTrue(resolution.showdown)
+        self.assertEqual(resolution.pots[0].winner_names, ("Alice",))
+        self.assertEqual(resolution.pots[0].hand_category, "Пара")
+        self.assertEqual(resolution.board, ("Tc", "7d", "9h", "3s", "2c"))
+
+    def test_odd_chip_split_goes_to_seat_after_button_first(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+        room.confirm_room_intent(3, "cara", "Cara", poker_room.ROOM_JOIN, now=1_002.0)
+        room.seats[1].stack = 333
+        room.seats[2].stack = 333
+        room.seats[3].stack = 333
+
+        hand = room.start_hand(
+            now=1_010.0,
+            deck=poker_room.stacked_deck(
+                {
+                    1: ("Ah", "Ad"),
+                    2: ("Ac", "As"),
+                    3: ("Kh", "Kd"),
+                    "board": ("Tc", "7d", "9c", "3s", "2h"),
+                }
+            ),
+        )
+        hand.apply_action(1, poker_room.PlayerAction("all_in"), now=1_011.0)
+        hand.apply_action(2, poker_room.PlayerAction("all_in"), now=1_012.0)
+        hand.apply_action(3, poker_room.PlayerAction("fold"), now=1_013.0)
+
+        self.assertEqual(hand.status, poker_room.STATUS_ENDED)
+        main_pot = hand.side_pots[0]
+        side_pot = hand.side_pots[1]
+        self.assertEqual(main_pot.amount, 100 * 3)
+        self.assertEqual(side_pot.amount, (333 - 100) * 2)
+        self.assertEqual(side_pot.winner_user_ids, [2, 1])
+
+
+class LeaverBetweenHandsTests(unittest.TestCase):
+    def test_leave_intent_removes_seat_when_no_hand_active(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_LEAVE, now=1_002.0)
+
+        self.assertNotIn(2, room.seats)
+        self.assertEqual(room.seat_order, [1])
+
+
 class PokerRoomPersistenceTests(unittest.TestCase):
     def test_json_state_persists_stacks_but_not_active_hand_private_information(self) -> None:
         room = poker_room.PokerRoom(now=1_000.0)
@@ -211,6 +297,24 @@ class PokerRoomPersistenceTests(unittest.TestCase):
             loaded = poker_room.JsonRoomStore(path).load()
             self.assertIsNone(loaded.current_hand)
             self.assertEqual(loaded.seats[1].stack, 9_950)
+
+    def test_save_writes_backup_copy_of_previous_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "room.json"
+            store = poker_room.JsonRoomStore(path)
+
+            room_first = poker_room.PokerRoom(now=1_000.0)
+            room_first.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+            store.save(room_first)
+            first_payload = path.read_text(encoding="utf-8")
+
+            room_second = poker_room.PokerRoom(now=2_000.0)
+            room_second.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=2_000.0)
+            store.save(room_second)
+
+            backup = path.with_suffix(path.suffix + ".bak")
+            self.assertTrue(backup.exists())
+            self.assertEqual(backup.read_text(encoding="utf-8"), first_payload)
 
 
 if __name__ == "__main__":

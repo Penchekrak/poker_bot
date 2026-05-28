@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFont
 
 import poker_room
 import poker_room_render
@@ -30,6 +30,16 @@ class PokerRoomRenderTests(unittest.TestCase):
                 for i, left in enumerate(boxes):
                     for right in boxes[i + 1 :]:
                         self.assertFalse(left.overlaps(right), f"{left} overlaps {right}")
+
+    def test_renderer_font_covers_cyrillic_so_russian_names_are_not_tofu(self) -> None:
+        font = ImageFont.truetype(str(poker_room_render.FONT_PATH), size=24)
+
+        cyrillic_widths = {char: font.getbbox(char)[2] for char in "АБВГДЕЖЗ"}
+
+        # If the font lacks Cyrillic glyphs Pillow falls back to a fixed tofu width,
+        # so every letter has identical bbox metrics. Distinct widths mean the font
+        # actually renders each glyph.
+        self.assertGreater(len(set(cyrillic_widths.values())), 1, cyrillic_widths)
 
     def test_render_outputs_nonblank_png_for_table_sizes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
