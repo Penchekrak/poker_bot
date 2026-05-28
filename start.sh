@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Long polling. Usage on server: export BOT_TOKEN=... ; nohup ./start.sh >>bot.log 2>&1 &
+# Long polling. Usage on server: export BOT_TOKEN=... ; nohup ./start.sh >>nohup.out 2>&1 &
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 cd "$(dirname "$0")"

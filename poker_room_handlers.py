@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from telegram.ext import ContextTypes
 import poker_room
 import poker_room_llm
 import poker_room_render
+
+log = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "pr"
 TURN_JOB_NAME = "poker-room-turn"
@@ -72,12 +75,30 @@ def get_room(context) -> poker_room.PokerRoom:
 
 async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
-    if config is None or not _allowed_message(update, config):
+    if config is None:
+        return
+    if not _allowed_message(update, config):
+        message = update.effective_message
+        chat = update.effective_chat
+        log.info(
+            "Ignored poker room message chat=%s thread=%s configured_chat=%s configured_thread=%s",
+            getattr(chat, "id", None),
+            getattr(message, "message_thread_id", None) if message is not None else None,
+            config.chat_id,
+            config.thread_id,
+        )
         return
     message = update.effective_message
     user = update.effective_user
     if message is None or user is None or not message.text:
         return
+    log.info(
+        "Poker room message chat=%s thread=%s user=%s text=%r",
+        update.effective_chat.id if update.effective_chat else None,
+        getattr(message, "message_thread_id", None),
+        user.id,
+        message.text[:160],
+    )
 
     room = get_room(context)
     _append_public_message(context, _display_name(user), message.text)
@@ -103,19 +124,50 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 _schedule_auto_deal(context)
             return
 
+    parsed_room = poker_room_llm.parse_room_intent_with_fallback(
+        message.text,
+        room,
+        recent_public_messages=context.bot_data.get("poker_room_recent_messages", []),
+    )
+    if parsed_room.kind == "room_intent" and parsed_room.room_intent and parsed_room.confidence >= 0.55:
+        log.info(
+            "Parsed room intent user=%s intent=%s confidence=%.2f",
+            user.id,
+            parsed_room.room_intent,
+            parsed_room.confidence,
+        )
+        markup = _confirmation_markup(parsed_room.room_intent, user.id)
+        await message.reply_text("Подтверди.", reply_markup=markup)
+        return
+
     admin_intent = _admin_intent_from_text(message.text)
     if admin_intent:
         if user.id not in config.admin_user_ids:
             await message.reply_text("Только админ стола.")
             return
-        await message.reply_text("Подтверди админское действие.", reply_markup=_admin_confirmation_markup(admin_intent, user.id))
+        await message.reply_text("Подтверди.", reply_markup=_admin_confirmation_markup(admin_intent, user.id))
         return
 
-    intent = _room_intent_from_text(message.text)
-    if intent:
-        markup = _confirmation_markup(intent, user.id)
-        await message.reply_text("Подтверди действие за столом.", reply_markup=markup)
+    return
+
+
+async def poker_room_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = _config(context)
+    if config is None or not _allowed_message(update, config):
         return
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if user.id not in config.admin_user_ids:
+        await message.reply_text("Только админ стола.")
+        return
+    room = get_room(context)
+    room.is_open = True
+    _save_room(context, room)
+    _schedule_auto_deal(context)
+    log.info("Poker room opened by admin user=%s chat=%s", user.id, config.chat_id)
+    await message.reply_text("Стол открыт.")
 
 
 async def poker_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

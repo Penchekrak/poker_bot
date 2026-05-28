@@ -80,6 +80,47 @@ class PokerRoomLlmTests(unittest.TestCase):
         self.assertGreaterEqual(parsed.confidence, 0.9)
         self.assertEqual(client.tools[0]["function"]["name"], "submit_poker_intent")
 
+    def test_room_intent_llm_parses_free_form_join_without_hand_context(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+
+        class FakeClient:
+            def complete_json(self, payload, tools=None, tool_choice=None):
+                raw = json.dumps(payload, ensure_ascii=False)
+                self.raw = raw
+                self.tools = tools
+                return {
+                    "kind": "room_intent",
+                    "room_intent": poker_room.ROOM_JOIN,
+                    "confidence": 0.87,
+                    "reason": "player wants to sit",
+                }
+
+        client = FakeClient()
+        parsed = poker_room_llm.parse_room_intent_with_fallback(
+            "я бы присел к вам за стол",
+            room,
+            client=client,
+            recent_public_messages=[("Bob", "садись")],
+        )
+
+        self.assertEqual(parsed.kind, "room_intent")
+        self.assertEqual(parsed.room_intent, poker_room.ROOM_JOIN)
+        self.assertGreater(parsed.confidence, 0.8)
+        self.assertEqual(client.tools[0]["function"]["name"], "submit_room_intent")
+        self.assertNotIn("deck", client.raw.lower())
+
+    def test_room_intent_deterministic_fallback_keeps_exact_commands(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+
+        class FailingClient:
+            def complete_json(self, payload, tools=None, tool_choice=None):
+                raise AssertionError("exact room commands should not call LLM")
+
+        parsed = poker_room_llm.parse_room_intent_with_fallback("сяду", room, client=FailingClient())
+
+        self.assertEqual(parsed.kind, "room_intent")
+        self.assertEqual(parsed.room_intent, poker_room.ROOM_JOIN)
+
     def test_tool_call_arguments_are_extracted_from_openai_response(self) -> None:
         message = {
             "role": "assistant",

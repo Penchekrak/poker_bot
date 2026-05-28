@@ -11,9 +11,8 @@ Texas Hold'em mini-game.
 - Mentioning the bot in a group triggers the same random-hand response.
 - A chat-scoped poker room can be enabled with `POKER_ROOM_CHAT_ID`; set
   `POKER_ROOM_THREAD_ID` only when it should be limited to one forum topic.
-  Players join/rebuy/sit out via chat messages, view private cards via callback
-  alerts, and act in chat. Configured poker admins can use `открыть стол`,
-  `закрыть стол`, and `сбросить стол` inside the configured room.
+  Admins open it with `/poker`. Players join/rebuy/sit out via free-form chat
+  messages, view private cards via callback alerts, and act in chat.
 
 ## Requirements
 
@@ -33,7 +32,9 @@ The bot uses long polling and reads `BOT_TOKEN` from the environment. For local
 testing, you can also create an untracked `.env` file with `BOT_TOKEN=...`.
 The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
 `POKER_ROOM_THREAD_ID`, `POKER_ADMIN_USER_IDS`, `POKER_STATE_PATH`,
-`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that feature is enabled.
+`BOT_LOG_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that
+feature is enabled. Logs default to `bot.log`; inspect a deployment with
+`tail -f bot.log`.
 
 ## Tests
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import poker_room
 import poker_room_handlers
+import poker_room_llm
 
 
 class FakeUser:
@@ -138,6 +140,49 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         room = poker_room_handlers.get_room(context)
         self.assertIn(1, room.seats)
         self.assertTrue(self.config.state_path.exists())
+
+    async def test_free_form_room_intent_uses_llm_parser_then_confirmation(self) -> None:
+        context = FakeContext(self.config)
+        user = FakeUser(1, "alice", "Alice")
+        message = FakeMessage("можно я присяду за стол?")
+
+        with patch.object(
+            poker_room_handlers.poker_room_llm,
+            "parse_room_intent_with_fallback",
+            return_value=poker_room_llm.ParsedIntent(
+                kind="room_intent",
+                room_intent=poker_room.ROOM_JOIN,
+                confidence=0.88,
+            ),
+        ) as parser:
+            await poker_room_handlers.poker_room_message(FakeUpdate(user, message=message), context)
+
+        self.assertEqual(parser.call_args.args[0], "можно я присяду за стол?")
+        self.assertEqual(message.reply_texts[0][0], "Подтверди.")
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
+        self.assertEqual(button.callback_data, "pr:confirm:join:1")
+
+    async def test_poker_command_opens_room_for_admin(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.is_open = False
+        admin = FakeUser(1, "alice", "Alice")
+        message = FakeMessage("/poker")
+
+        await poker_room_handlers.poker_room_command(FakeUpdate(admin, message=message), context)
+
+        self.assertTrue(room.is_open)
+        self.assertEqual(message.reply_texts[-1][0], "Стол открыт.")
+        self.assertTrue(self.config.state_path.exists())
+
+    async def test_poker_command_rejects_non_admin(self) -> None:
+        context = FakeContext(self.config)
+        user = FakeUser(2, "bob", "Bob")
+        message = FakeMessage("/poker")
+
+        await poker_room_handlers.poker_room_command(FakeUpdate(user, message=message), context)
+
+        self.assertEqual(message.reply_texts[-1][0], "Только админ стола.")
 
     async def test_private_cards_callback_returns_only_clicking_players_hand(self) -> None:
         context = FakeContext(self.config)
