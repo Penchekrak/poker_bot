@@ -1,4 +1,4 @@
-"""Run the bot with Telegram long polling."""
+"""Run the bot with Telegram long polling or webhooks."""
 
 from __future__ import annotations
 
@@ -89,27 +89,17 @@ async def log_update(update: Update, context) -> None:
     log.info("Update received %s", update_summary(update))
 
 
-def main() -> None:
-    configure_logging()
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        log.error("Set BOT_TOKEN in the environment.")
-        sys.exit(1)
-    log.info(
-        "Runtime config: poker_chat=%s poker_thread=%s poker_admins=%s llm=%s log_path=%s",
-        os.environ.get("POKER_ROOM_CHAT_ID") or "unset",
-        "set" if os.environ.get("POKER_ROOM_THREAD_ID") else "unset",
-        "set" if os.environ.get("POKER_ADMIN_USER_IDS") else "unset",
-        "set" if os.environ.get("LLM_BASE_URL") and os.environ.get("LLM_MODEL") else "unset",
-        os.environ.get("BOT_LOG_PATH", "bot.log"),
-    )
-
+def build_application(token: str):
     app = (
         Application.builder()
         .token(token)
         .build()
     )
+    register_handlers(app)
+    return app
 
+
+def register_handlers(app) -> None:
     app.add_handler(TypeHandler(Update, log_update), group=-100)
     app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT))
     app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT))
@@ -132,8 +122,92 @@ def main() -> None:
         )
     )
 
-    log.info("Starting long polling…")
+
+def run_application(app) -> None:
+    webhook_url = _webhook_url_from_env()
+    if webhook_url:
+        listen = os.environ.get("WEBHOOK_LISTEN", "127.0.0.1")
+        port = _int_from_env("WEBHOOK_PORT", 8080)
+        url_path = os.environ.get("WEBHOOK_PATH", "").strip("/")
+        secret_token = os.environ.get("WEBHOOK_SECRET_TOKEN") or None
+        public_ip = os.environ.get("WEBHOOK_IP_ADDRESS") or os.environ.get("WEBHOOK_PUBLIC_IP") or None
+        cert = os.environ.get("WEBHOOK_CERT") or None
+        key = os.environ.get("WEBHOOK_KEY") or None
+        log.info(
+            "Starting webhook listen=%s port=%s url_path=%s webhook_url=set public_ip=%s cert=%s secret_token=%s",
+            listen,
+            port,
+            url_path or "<empty>",
+            "set" if public_ip else "unset",
+            "set" if cert else "unset",
+            "set" if secret_token else "unset",
+        )
+        app.run_webhook(
+            listen=listen,
+            port=port,
+            url_path=url_path,
+            webhook_url=webhook_url,
+            secret_token=secret_token,
+            cert=cert,
+            key=key,
+            ip_address=public_ip,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=_bool_from_env("WEBHOOK_DROP_PENDING_UPDATES", False),
+        )
+        return
+    log.info("Starting long polling...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+def main() -> None:
+    configure_logging()
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        log.error("Set BOT_TOKEN in the environment.")
+        sys.exit(1)
+    log.info(
+        "Runtime config: poker_chat=%s poker_thread=%s poker_admins=%s llm=%s log_path=%s webhook=%s",
+        os.environ.get("POKER_ROOM_CHAT_ID") or "unset",
+        "set" if os.environ.get("POKER_ROOM_THREAD_ID") else "unset",
+        "set" if os.environ.get("POKER_ADMIN_USER_IDS") else "unset",
+        "set" if os.environ.get("LLM_BASE_URL") and os.environ.get("LLM_MODEL") else "unset",
+        os.environ.get("BOT_LOG_PATH", "bot.log"),
+        "set" if _webhook_url_from_env() else "unset",
+    )
+
+    run_application(build_application(token))
+
+
+def _int_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("Invalid integer for %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _bool_from_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _webhook_url_from_env() -> str | None:
+    explicit = os.environ.get("WEBHOOK_URL")
+    if explicit:
+        return explicit
+    public_ip = os.environ.get("WEBHOOK_PUBLIC_IP")
+    if not public_ip:
+        return None
+    port = _int_from_env("WEBHOOK_PORT", 8080)
+    path = os.environ.get("WEBHOOK_PATH", "").strip("/")
+    port_part = "" if port == 443 else f":{port}"
+    path_part = f"/{path}" if path else ""
+    return f"https://{public_ip}{port_part}{path_part}"
 
 
 if __name__ == "__main__":

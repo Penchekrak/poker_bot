@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from telegram.error import BadRequest
 
 import poker_room
 import poker_room_handlers
@@ -27,10 +30,16 @@ class FakeMessage:
         self.text = text
         self.chat_id = chat_id
         self.message_thread_id = thread_id
+        self.message_id = 100
         self.reply_texts: list[tuple[str, object | None]] = []
+        self.reactions: list[tuple[object, bool | None]] = []
 
     async def reply_text(self, text: str, reply_markup=None, **kwargs) -> None:
         self.reply_texts.append((text, reply_markup))
+
+    async def set_reaction(self, reaction=None, is_big=None, **kwargs) -> bool:
+        self.reactions.append((reaction, is_big))
+        return True
 
 
 class FakeCallbackQuery:
@@ -39,8 +48,11 @@ class FakeCallbackQuery:
         self.message = type("Msg", (), {"chat_id": chat_id, "message_thread_id": thread_id})()
         self.from_user = user
         self.answers: list[tuple[str, bool]] = []
+        self.fail_answer = False
 
     async def answer(self, text: str = "", show_alert: bool = False, **kwargs) -> None:
+        if self.fail_answer:
+            raise BadRequest("Query is too old and response timeout expired or query id is invalid")
         self.answers.append((text, show_alert))
 
 
@@ -56,28 +68,53 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent_photos: list[dict] = []
         self.edited_media: list[dict] = []
+        self.sent_messages: list[dict] = []
+        self.fail_send_photo = False
+        self.fail_edit_media = False
 
     async def send_photo(self, **kwargs):
+        if self.fail_send_photo:
+            raise RuntimeError("send_photo failed")
         self.sent_photos.append(kwargs)
         return type("Sent", (), {"message_id": 500 + len(self.sent_photos)})()
 
     async def edit_message_media(self, **kwargs):
+        if self.fail_edit_media:
+            raise RuntimeError("edit_message_media failed")
         self.edited_media.append(kwargs)
+
+    async def send_message(self, **kwargs):
+        self.sent_messages.append(kwargs)
+        return type("Sent", (), {"message_id": 700 + len(self.sent_messages)})()
+
+
+class FakeJob:
+    def __init__(self, name: str | None, when: float, data: dict | None = None) -> None:
+        self.name = name
+        self.when = when
+        self.data = data
+        self.removed = False
+
+    def schedule_removal(self) -> None:
+        self.removed = True
 
 
 class FakeJobQueue:
     def __init__(self) -> None:
         self.jobs: list[tuple[str, float]] = []
         self.job_kwargs_by_name: dict[str, dict] = {}
+        self.job_objects: list[FakeJob] = []
 
     def get_jobs_by_name(self, name: str):
-        return []
+        return [job for job in self.job_objects if job.name == name and not job.removed]
 
     def run_once(self, callback, when, name=None, data=None, job_kwargs=None):
         self.jobs.append((name, when))
+        job = FakeJob(name, when, data=data)
+        self.job_objects.append(job)
         if name is not None:
             self.job_kwargs_by_name[name] = job_kwargs or {}
-        return object()
+        return job
 
 
 class FakeContext:
@@ -216,11 +253,81 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        query = FakeCallbackQuery("pr:cards", FakeUser(1, "alice", "Alice"))
+        hand = room.current_hand
+        self.assertIsNotNone(hand)
+        query = FakeCallbackQuery(f"pr:cards:{hand.hand_id}", FakeUser(1, "alice", "Alice"))
         await poker_room_handlers.poker_room_callback(FakeUpdate(query.from_user, query=query), context)
 
         self.assertEqual(query.answers[-1][0], "Твои карты: A♦ · A♥")
         self.assertTrue(query.answers[-1][1])
+
+    async def test_private_cards_callback_rejects_stale_hand_button(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        first_hand = room.start_hand()
+        stale_hand_id = first_hand.hand_id
+        first_hand.apply_action(first_hand.to_act_user_id, poker_room.PlayerAction("fold"))
+        room.start_hand()
+
+        query = FakeCallbackQuery(f"pr:cards:{stale_hand_id}", FakeUser(1, "alice", "Alice"))
+        await poker_room_handlers.poker_room_callback(FakeUpdate(query.from_user, query=query), context)
+
+        self.assertIn("устарела", query.answers[-1][0].lower())
+        self.assertTrue(query.answers[-1][1])
+
+    async def test_reveal_callback_rejects_stale_hand_button(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        first_hand = room.start_hand()
+        stale_hand_id = first_hand.hand_id
+        first_hand.apply_action(first_hand.to_act_user_id, poker_room.PlayerAction("fold"))
+        room.start_hand()
+
+        query = FakeCallbackQuery(f"pr:reveal:{stale_hand_id}:1", FakeUser(2, "bob", "Bob"))
+        await poker_room_handlers.poker_room_callback(FakeUpdate(query.from_user, query=query), context)
+
+        self.assertIn("устарела", query.answers[-1][0].lower())
+        self.assertTrue(query.answers[-1][1])
+
+    async def test_turn_timeout_job_ignores_stale_actor_payload(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand(now=1_000.0)
+        first_actor = hand.to_act_user_id
+        poker_room_handlers._schedule_turn_timeout(context, hand)
+        stale_job = context.job_queue.get_jobs_by_name(poker_room_handlers.TURN_JOB_NAME)[0]
+
+        hand.apply_action(first_actor, poker_room.PlayerAction("call"), now=1_001.0)
+        context.job = stale_job
+        await poker_room_handlers.poker_room_timeout_job(context)
+
+        self.assertEqual(hand.street, poker_room.STREET_PREFLOP)
+        self.assertEqual(hand.to_act_user_id, 2)
+
+    async def test_render_falls_back_to_new_message_when_edit_fails(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand(now=1_000.0)
+
+        rendered = await poker_room_handlers._render_room(context, hand, force_new=True)
+        self.assertTrue(rendered)
+        original_message_id = context.bot_data["poker_room_render_message_id"]
+        context.bot.fail_edit_media = True
+
+        hand.apply_action(hand.to_act_user_id, poker_room.PlayerAction("call"), now=1_001.0)
+        rendered = await poker_room_handlers._render_room(context, hand, force_new=False)
+
+        self.assertTrue(rendered)
+        self.assertGreaterEqual(len(context.bot.sent_photos), 2)
+        self.assertNotEqual(context.bot_data["poker_room_render_message_id"], original_message_id)
 
     async def test_current_actor_chat_applies_action_and_schedules_turn_timer(self) -> None:
         context = FakeContext(self.config)
@@ -240,6 +347,51 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
             context.job_queue.job_kwargs_by_name["poker-room-turn"]["misfire_grace_time"],
             30,
         )
+        self.assertEqual(message.reactions[-1][0], "👌")
+
+    async def test_current_actor_non_action_gets_polite_mention_prompt(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        room.start_hand()
+
+        message = FakeMessage("думаю")
+        await poker_room_handlers.poker_room_message(FakeUpdate(FakeUser(1, "alice", "Alice"), message=message), context)
+
+        self.assertEqual(len(message.reply_texts), 1)
+        self.assertIn("@alice", message.reply_texts[0][0])
+        self.assertIn("твой ход", message.reply_texts[0][0].lower())
+
+    async def test_ended_hand_sends_final_message_and_schedules_next_deal(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        room.start_hand()
+
+        message = FakeMessage("fold")
+        await poker_room_handlers.poker_room_message(FakeUpdate(FakeUser(1, "alice", "Alice"), message=message), context)
+
+        self.assertEqual(room.current_hand.status, poker_room.STATUS_ENDED)
+        self.assertEqual(len(context.bot.sent_messages), 1)
+        self.assertIn("Раздача окончена", context.bot.sent_messages[0]["text"])
+        self.assertIn("Новая раздача", context.bot.sent_messages[0]["text"])
+        self.assertIn(("poker-room-auto-deal", poker_room.AUTO_DEAL_SECONDS), context.job_queue.jobs)
+
+    async def test_auto_deal_render_failure_rolls_back_invisible_hand_and_unsettled_stacks(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        context.bot.fail_send_photo = True
+
+        await poker_room_handlers.poker_room_auto_deal_job(context)
+
+        self.assertIsNone(room.current_hand)
+        self.assertEqual(room.seats[1].stack, poker_room.STARTING_STACK)
+        self.assertEqual(room.seats[2].stack, poker_room.STARTING_STACK)
+        self.assertEqual(sum(seat.stack for seat in room.seats.values()), poker_room.STARTING_STACK * 2)
 
     async def test_actor_action_after_restart_schedules_new_hand_instead_of_silent_ignore(self) -> None:
         context = FakeContext(self.config)
@@ -276,6 +428,39 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         room = poker_room_handlers.get_room(context)
         self.assertFalse(room.is_open)
         self.assertTrue(self.config.state_path.exists())
+
+    async def test_admin_close_cancels_turn_and_auto_deal_jobs(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand()
+        poker_room_handlers._schedule_turn_timeout(context, hand)
+        poker_room_handlers._schedule_auto_deal(context)
+        admin = FakeUser(1, "alice", "Alice")
+        message = FakeMessage("закрыть стол")
+
+        await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=message), context)
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
+        query = FakeCallbackQuery(button.callback_data, admin)
+        await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
+
+        self.assertEqual(context.job_queue.get_jobs_by_name(poker_room_handlers.TURN_JOB_NAME), [])
+        self.assertEqual(context.job_queue.get_jobs_by_name(poker_room_handlers.AUTO_DEAL_JOB_NAME), [])
+        data = json.loads(self.config.state_path.read_text(encoding="utf-8"))
+        self.assertFalse(data["is_open"])
+        self.assertEqual(sum(seat["stack"] for seat in data["seats"]), poker_room.STARTING_STACK * 2)
+
+    async def test_stale_admin_callback_answer_does_not_raise(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        admin = FakeUser(1, "alice", "Alice")
+        query = FakeCallbackQuery("pr:admin:close:1", admin)
+        query.fail_answer = True
+
+        await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
+
+        self.assertFalse(room.is_open)
 
     async def test_admin_reset_clears_room_state(self) -> None:
         context = FakeContext(self.config)

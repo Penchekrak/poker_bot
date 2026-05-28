@@ -67,6 +67,99 @@ class MainLoggingTests(unittest.TestCase):
 
             self.assertIn("file logging probe", path.read_text(encoding="utf-8"))
 
+    def test_run_application_uses_polling_without_webhook_url(self) -> None:
+        app = FakeApplication()
+
+        with patch.dict("os.environ", {}, clear=True):
+            main.run_application(app)
+
+        self.assertEqual(app.polling_calls, [{"allowed_updates": main.Update.ALL_TYPES}])
+        self.assertEqual(app.webhook_calls, [])
+
+    def test_run_application_uses_webhook_when_configured(self) -> None:
+        app = FakeApplication()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WEBHOOK_URL": "https://example.com/poker-hook",
+                "WEBHOOK_LISTEN": "0.0.0.0",
+                "WEBHOOK_PORT": "8443",
+                "WEBHOOK_PATH": "poker-hook",
+                "WEBHOOK_SECRET_TOKEN": "secret",
+                "WEBHOOK_DROP_PENDING_UPDATES": "1",
+            },
+            clear=True,
+        ):
+            main.run_application(app)
+
+        self.assertEqual(app.polling_calls, [])
+        self.assertEqual(
+            app.webhook_calls,
+            [
+                {
+                    "listen": "0.0.0.0",
+                    "port": 8443,
+                    "url_path": "poker-hook",
+                    "webhook_url": "https://example.com/poker-hook",
+                    "secret_token": "secret",
+                    "cert": None,
+                    "key": None,
+                    "ip_address": None,
+                    "allowed_updates": main.Update.ALL_TYPES,
+                    "drop_pending_updates": True,
+                }
+            ],
+        )
+
+    def test_run_application_builds_webhook_url_from_public_ip(self) -> None:
+        app = FakeApplication()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WEBHOOK_PUBLIC_IP": "158.160.97.8",
+                "WEBHOOK_LISTEN": "0.0.0.0",
+                "WEBHOOK_PORT": "8443",
+                "WEBHOOK_PATH": "poker-secret",
+                "WEBHOOK_CERT": "/etc/poker/webhook.pem",
+                "WEBHOOK_KEY": "/etc/poker/webhook.key",
+            },
+            clear=True,
+        ):
+            main.run_application(app)
+
+        self.assertEqual(app.polling_calls, [])
+        self.assertEqual(
+            app.webhook_calls,
+            [
+                {
+                    "listen": "0.0.0.0",
+                    "port": 8443,
+                    "url_path": "poker-secret",
+                    "webhook_url": "https://158.160.97.8:8443/poker-secret",
+                    "secret_token": None,
+                    "cert": "/etc/poker/webhook.pem",
+                    "key": "/etc/poker/webhook.key",
+                    "ip_address": "158.160.97.8",
+                    "allowed_updates": main.Update.ALL_TYPES,
+                    "drop_pending_updates": False,
+                }
+            ],
+        )
+
+
+class FakeApplication:
+    def __init__(self) -> None:
+        self.polling_calls: list[dict] = []
+        self.webhook_calls: list[dict] = []
+
+    def run_polling(self, **kwargs) -> None:
+        self.polling_calls.append(kwargs)
+
+    def run_webhook(self, **kwargs) -> None:
+        self.webhook_calls.append(kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

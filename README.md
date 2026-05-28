@@ -28,8 +28,13 @@ export BOT_TOKEN=123456:replace-with-your-token
 ./start.sh
 ```
 
-The bot uses long polling and reads `BOT_TOKEN` from the environment. For local
-testing, you can also create an untracked `.env` file with `BOT_TOKEN=...`.
+The bot reads `BOT_TOKEN` from the environment. By default it uses long polling.
+For webhook mode, set either `WEBHOOK_URL` or `WEBHOOK_PUBLIC_IP`; the latter
+builds `https://<ip>:<WEBHOOK_PORT>/<WEBHOOK_PATH>` and also passes that IP to
+Telegram. Optional webhook settings are `WEBHOOK_LISTEN`, `WEBHOOK_PORT`,
+`WEBHOOK_PATH`, `WEBHOOK_IP_ADDRESS`, `WEBHOOK_CERT`, `WEBHOOK_KEY`,
+`WEBHOOK_SECRET_TOKEN`, and `WEBHOOK_DROP_PENDING_UPDATES=1`. For local testing,
+you can also create an untracked `.env` file with these values.
 The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
 `POKER_ROOM_THREAD_ID`, `POKER_ADMIN_USER_IDS`, `POKER_STATE_PATH`,
 `BOT_LOG_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that

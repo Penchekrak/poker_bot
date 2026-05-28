@@ -192,14 +192,16 @@ class PokerRoom:
                 stack=seat.stack,
             )
 
+        created_at = _coerce_now(now)
         hand = PokerHand(
             room=self,
             players=players,
             order=active_user_ids,
             deck=draw_deck,
             button_user_id=button,
-            created_at=_coerce_now(now),
-            updated_at=_coerce_now(now),
+            created_at=created_at,
+            updated_at=created_at,
+            hand_id=_new_hand_id(created_at),
         )
         hand.post_blinds()
         self.current_hand = hand
@@ -282,6 +284,7 @@ class PokerHand:
     button_user_id: int
     created_at: float
     updated_at: float
+    hand_id: str
     status: str = STATUS_BETTING
     street: str = STREET_PREFLOP
     board: list[str] = field(default_factory=list)
@@ -322,6 +325,7 @@ class PokerHand:
             f"Блайнды: {self.players[self.small_blind_user_id].name} 50, "
             f"{self.players[self.big_blind_user_id].name} 100"
         )
+        self._normalize_to_act_after_forced_commits(self.created_at)
 
     def private_hand_text(self, user_id: int) -> str:
         player = self.players[user_id]
@@ -410,6 +414,11 @@ class PokerHand:
     def choose_public_reveal(self, user_id: int, reveal: bool) -> GameResult:
         if self.status != STATUS_ENDED:
             return GameResult("invalid", "Раздача еще идет.")
+        player = self.players.get(user_id)
+        if player is None:
+            return GameResult("invalid", "Игрок не в этой раздаче.")
+        if player.folded:
+            return GameResult("invalid", "Фолд уже не показываем.")
         if user_id not in self.optional_reveal_user_ids():
             return GameResult("already_decided", "Эта рука уже решена.")
         if reveal:
@@ -421,8 +430,9 @@ class PokerHand:
     def optional_reveal_user_ids(self) -> set[int]:
         if self.status != STATUS_ENDED:
             return set()
+        eligible = {user_id for user_id, player in self.players.items() if not player.folded}
         decided = self.public_revealed_user_ids | self.mucked_user_ids
-        return set(self.players) - decided
+        return eligible - decided
 
     def public_snapshot(self) -> dict[str, object]:
         return {
@@ -681,6 +691,21 @@ class PokerHand:
                 seat.stack = 0
                 seat.sitting_out = True
 
+    def _normalize_to_act_after_forced_commits(self, now: float | None = None) -> None:
+        actor_id = self.to_act_user_id
+        if actor_id is None:
+            return
+        actor = self.players[actor_id]
+        if not actor.folded and not actor.all_in:
+            return
+        self.to_act_user_id = self._next_to_act_after(actor_id)
+        if self.to_act_user_id is not None:
+            return
+        if self._live_user_ids_count() <= 1:
+            self._award_folded_pot(now)
+            return
+        self._runout_to_showdown(now)
+
 
 class JsonRoomStore:
     """Atomic JSON persistence for public room state only."""
@@ -689,8 +714,11 @@ class JsonRoomStore:
         self.path = Path(path)
 
     def save(self, room: PokerRoom) -> None:
+        self.save_public_dict(room.to_public_dict())
+
+    def save_public_dict(self, data: dict[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(room.to_public_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+        payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
             tmp.write(payload)
             tmp.write("\n")
@@ -725,6 +753,11 @@ def _shuffled_deck() -> list[str]:
     deck = full_deck()
     random.shuffle(deck)
     return deck
+
+
+def _new_hand_id(now: float | None = None) -> str:
+    millis = int(_coerce_now(now) * 1000)
+    return f"h{millis:x}{random.getrandbits(16):04x}"
 
 
 def _coerce_now(now: float | None) -> float:

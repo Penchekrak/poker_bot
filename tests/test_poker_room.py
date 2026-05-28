@@ -124,7 +124,33 @@ class PokerRoomEngineTests(unittest.TestCase):
 
         self.assertEqual(hand.status, poker_room.STATUS_ENDED)
         self.assertEqual(hand.public_revealed_user_ids, set())
-        self.assertEqual(hand.optional_reveal_user_ids(), {1, 2, 3})
+        self.assertEqual(hand.optional_reveal_user_ids(), {3})
+
+    def test_short_small_blind_all_in_keeps_hand_progressing(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+        room.seats[1].stack = 50
+        hand = room.start_hand(now=1_010.0)
+
+        self.assertEqual(hand.to_act_user_id, 2)
+        self.assertTrue(hand.players[1].all_in)
+
+        result = hand.apply_timeout(now=1_131.0)
+
+        self.assertEqual(result.kind, "showdown")
+        self.assertEqual(hand.status, poker_room.STATUS_ENDED)
+
+    def test_folded_player_cannot_choose_public_reveal(self) -> None:
+        room = self.make_room()
+        hand = room.start_hand(now=1_010.0)
+        hand.apply_action(1, poker_room.PlayerAction("fold"), now=1_011.0)
+        hand.apply_action(2, poker_room.PlayerAction("fold"), now=1_012.0)
+
+        result = hand.choose_public_reveal(1, reveal=True)
+
+        self.assertEqual(result.kind, "invalid")
+        self.assertEqual(result.text, "Фолд уже не показываем.")
 
     def test_timeout_checks_for_free_and_folds_when_facing_bet(self) -> None:
         room = self.make_room()

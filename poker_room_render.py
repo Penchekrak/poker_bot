@@ -10,8 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 import poker_room
 
-WIDTH = 1280
-HEIGHT = 800
+WIDTH = 1920
+HEIGHT = 1200
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "poker_table"
 
 
@@ -49,12 +49,12 @@ class RenderResult:
 def layout_seat_boxes(count: int, width: int = WIDTH, height: int = HEIGHT) -> dict[int, Box]:
     if count < 2 or count > poker_room.MAX_SEATS:
         raise ValueError("seat count must be between 2 and 10")
-    box_w = 178
-    box_h = 98
+    box_w = 246
+    box_h = 136
     center_x = width // 2
     center_y = height // 2
-    radius_x = width // 2 - box_w // 2 - 32
-    radius_y = height // 2 - box_h // 2 - 30
+    radius_x = width // 2 - box_w // 2 - 48
+    radius_y = height // 2 - box_h // 2 - 45
     boxes: dict[int, Box] = {}
     for index in range(count):
         angle = -math.pi / 2 + (2 * math.pi * index / count)
@@ -73,9 +73,9 @@ def render_table_png(hand: poker_room.PokerHand, path: str | Path) -> RenderResu
     output = Path(path)
     image = Image.new("RGBA", (WIDTH, HEIGHT), "#1f2937ff")
     draw = ImageDraw.Draw(image)
-    font_big = _font(28)
-    font = _font(18)
-    font_small = _font(14)
+    font_big = _font(42)
+    font = _font(27)
+    font_small = _font(20)
 
     _draw_table(draw)
     _draw_banner(draw, _status_text(hand), font)
@@ -92,25 +92,25 @@ def render_table_png(hand: poker_room.PokerHand, path: str | Path) -> RenderResu
 
 def _draw_table(draw: ImageDraw.ImageDraw) -> None:
     # Thick pixel-ish border around an oval table; no copied Clubs assets.
-    outer = (95, 120, WIDTH - 95, HEIGHT - 90)
-    inner = (155, 180, WIDTH - 155, HEIGHT - 155)
-    draw.ellipse(outer, fill="#ee6c4d", outline="#172333", width=8)
-    draw.ellipse(inner, fill="#83bfd1", outline="#213243", width=6)
-    draw.ellipse((245, 260, WIDTH - 245, HEIGHT - 235), outline="#5d9fb5", width=4)
+    outer = (142, 180, WIDTH - 142, HEIGHT - 135)
+    inner = (232, 270, WIDTH - 232, HEIGHT - 232)
+    draw.ellipse(outer, fill="#ee6c4d", outline="#172333", width=12)
+    draw.ellipse(inner, fill="#83bfd1", outline="#213243", width=9)
+    draw.ellipse((368, 390, WIDTH - 368, HEIGHT - 352), outline="#5d9fb5", width=6)
 
 
 def _draw_banner(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> None:
-    box = Box(390, 206, 500, 46)
+    box = Box(585, 309, 750, 69)
     _pixel_rect(draw, box, "#2f3f54", "#f7f0d6", shadow=True)
     _center_text(draw, box, text, font, "#f7f0d6")
 
 
 def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: ImageFont.ImageFont) -> None:
-    card_w, card_h = 76, 112
-    gap = 10
+    card_w, card_h = 114, 168
+    gap = 15
     total = card_w * 5 + gap * 4
     start_x = (WIDTH - total) // 2
-    y = 334
+    y = 501
     cards = list(hand.board)
     while len(cards) < 5:
         cards.append("__back__")
@@ -118,11 +118,11 @@ def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.
         asset = _card_asset(card)
         image.alpha_composite(asset.resize((card_w, card_h), Image.Resampling.NEAREST), (start_x + offset * (card_w + gap), y))
 
-    pot_box = Box(505, 474, 270, 50)
+    pot_box = Box(758, 711, 405, 75)
     _pixel_rect(draw, pot_box, "#98c7da", "#172333", shadow=True)
-    chip = _asset("ChipRed.png").resize((28, 28), Image.Resampling.NEAREST)
-    image.alpha_composite(chip, (pot_box.x + 18, pot_box.y + 11))
-    image.alpha_composite(chip, (pot_box.right - 46, pot_box.y + 11))
+    chip = _asset("ChipRed.png").resize((42, 42), Image.Resampling.NEAREST)
+    image.alpha_composite(chip, (pot_box.x + 27, pot_box.y + 16))
+    image.alpha_composite(chip, (pot_box.right - 69, pot_box.y + 16))
     _center_text(draw, pot_box, f"POT {hand.pot}", font, "#172333")
 
 
@@ -143,22 +143,22 @@ def _draw_seat(
         border = "#9aa0a8"
     _pixel_rect(draw, box, fill, border, shadow=True)
 
-    name = _truncate(player.name.upper(), 15)
-    _center_text(draw, Box(box.x + 8, box.y + 7, box.w - 16, 20), name, font_small, "#f7f0d6")
+    name = _truncate(player.name.upper(), 18)
+    _center_text(draw, Box(box.x + 12, box.y + 10, box.w - 24, 28), name, font_small, "#f7f0d6")
 
-    card_y = box.y + 30
-    card_1 = _seat_card_asset(hand, player, 0).resize((25, 39), Image.Resampling.NEAREST)
-    card_2 = _seat_card_asset(hand, player, 1).resize((25, 39), Image.Resampling.NEAREST)
-    image.alpha_composite(card_1, (box.x + box.w // 2 - 28, card_y))
-    image.alpha_composite(card_2, (box.x + box.w // 2 + 3, card_y))
+    card_y = box.y + 42
+    card_1 = _seat_card_asset(hand, player, 0).resize((38, 59), Image.Resampling.NEAREST)
+    card_2 = _seat_card_asset(hand, player, 1).resize((38, 59), Image.Resampling.NEAREST)
+    image.alpha_composite(card_1, (box.x + box.w // 2 - 42, card_y))
+    image.alpha_composite(card_2, (box.x + box.w // 2 + 5, card_y))
 
     stack_text = "FOLD" if player.folded else str(player.stack)
-    _pixel_rect(draw, Box(box.x + 22, box.y + 72, box.w - 44, 20), "#263342", "#f7f0d6")
-    _center_text(draw, Box(box.x + 22, box.y + 71, box.w - 44, 22), stack_text, font_small, "#f7f0d6")
+    _pixel_rect(draw, Box(box.x + 32, box.y + 100, box.w - 64, 28), "#263342", "#f7f0d6")
+    _center_text(draw, Box(box.x + 32, box.y + 99, box.w - 64, 30), stack_text, font_small, "#f7f0d6")
 
     if player.street_bet:
-        _pixel_rect(draw, Box(box.x + box.w - 55, box.y - 10, 64, 24), "#f0b35a", "#172333")
-        _center_text(draw, Box(box.x + box.w - 55, box.y - 11, 64, 26), str(player.street_bet), font_small, "#172333")
+        _pixel_rect(draw, Box(box.x + box.w - 82, box.y - 15, 96, 36), "#f0b35a", "#172333")
+        _center_text(draw, Box(box.x + box.w - 82, box.y - 16, 96, 38), str(player.street_bet), font_small, "#172333")
 
 
 def _seat_card_asset(hand: poker_room.PokerHand, player: poker_room.HandPlayer, index: int) -> Image.Image:
@@ -195,8 +195,8 @@ def _pixel_rect(
     shadow: bool = False,
 ) -> None:
     if shadow:
-        draw.rectangle((box.x + 6, box.y + 6, box.right + 6, box.bottom + 6), fill="#00000055")
-    draw.rectangle((box.x, box.y, box.right, box.bottom), fill=fill, outline=outline, width=4)
+        draw.rectangle((box.x + 9, box.y + 9, box.right + 9, box.bottom + 9), fill="#00000055")
+    draw.rectangle((box.x, box.y, box.right, box.bottom), fill=fill, outline=outline, width=6)
 
 
 def _center_text(

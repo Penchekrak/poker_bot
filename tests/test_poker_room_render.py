@@ -40,10 +40,10 @@ class PokerRoomRenderTests(unittest.TestCase):
 
                     result = poker_room_render.render_table_png(hand, path)
 
-                    self.assertEqual(result.size, (1280, 800))
+                    self.assertEqual(result.size, (1920, 1200))
                     self.assertTrue(path.exists())
                     with Image.open(path) as image:
-                        self.assertEqual(image.size, (1280, 800))
+                        self.assertEqual(image.size, (1920, 1200))
                         colors = image.convert("RGB").getcolors(maxcolors=2_000_000)
                     self.assertIsNotNone(colors)
                     self.assertGreater(len(colors or []), 20)

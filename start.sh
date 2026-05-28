@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Long polling. Usage on server: export BOT_TOKEN=... ; nohup ./start.sh >>nohup.out 2>&1 &
+# Runtime wrapper. Set WEBHOOK_URL or WEBHOOK_PUBLIC_IP for webhook mode.
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 cd "$(dirname "$0")"
