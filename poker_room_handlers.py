@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 CALLBACK_PREFIX = "pr"
 TURN_JOB_NAME = "poker-room-turn"
 AUTO_DEAL_JOB_NAME = "poker-room-auto-deal"
+JOB_MISFIRE_GRACE_SECONDS = 60
 ADMIN_OPEN = "open"
 ADMIN_CLOSE = "close"
 ADMIN_RESET = "reset"
@@ -462,6 +463,7 @@ def _schedule_turn_timeout(context, hand: poker_room.PokerHand) -> None:
         poker_room.TURN_TIMEOUT_SECONDS,
         name=TURN_JOB_NAME,
         data={"to_act_user_id": hand.to_act_user_id},
+        job_kwargs={"misfire_grace_time": JOB_MISFIRE_GRACE_SECONDS},
     )
 
 
@@ -474,7 +476,12 @@ def _schedule_auto_deal(context) -> None:
         return
     for job in job_queue.get_jobs_by_name(AUTO_DEAL_JOB_NAME):
         job.schedule_removal()
-    job_queue.run_once(poker_room_auto_deal_job, poker_room.AUTO_DEAL_SECONDS, name=AUTO_DEAL_JOB_NAME)
+    job_queue.run_once(
+        poker_room_auto_deal_job,
+        poker_room.AUTO_DEAL_SECONDS,
+        name=AUTO_DEAL_JOB_NAME,
+        job_kwargs={"misfire_grace_time": JOB_MISFIRE_GRACE_SECONDS},
+    )
 
 
 def _schedule_auto_deal_if_missing(context) -> None:

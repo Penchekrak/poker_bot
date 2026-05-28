@@ -68,12 +68,15 @@ class FakeBot:
 class FakeJobQueue:
     def __init__(self) -> None:
         self.jobs: list[tuple[str, float]] = []
+        self.job_kwargs_by_name: dict[str, dict] = {}
 
     def get_jobs_by_name(self, name: str):
         return []
 
-    def run_once(self, callback, when, name=None, data=None):
+    def run_once(self, callback, when, name=None, data=None, job_kwargs=None):
         self.jobs.append((name, when))
+        if name is not None:
+            self.job_kwargs_by_name[name] = job_kwargs or {}
         return object()
 
 
@@ -175,6 +178,20 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.reply_texts[-1][0], "Стол открыт.")
         self.assertTrue(self.config.state_path.exists())
 
+    async def test_auto_deal_job_allows_short_scheduler_misfires(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        admin = FakeUser(1, "alice", "Alice")
+
+        await poker_room_handlers.poker_room_command(FakeUpdate(admin, message=FakeMessage("/poker")), context)
+
+        self.assertGreaterEqual(
+            context.job_queue.job_kwargs_by_name["poker-room-auto-deal"]["misfire_grace_time"],
+            30,
+        )
+
     async def test_poker_command_rejects_non_admin(self) -> None:
         context = FakeContext(self.config)
         user = FakeUser(2, "bob", "Bob")
@@ -219,6 +236,10 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(hand)
         self.assertEqual(hand.current_bet, 500)
         self.assertIn(("poker-room-turn", poker_room.TURN_TIMEOUT_SECONDS), context.job_queue.jobs)
+        self.assertGreaterEqual(
+            context.job_queue.job_kwargs_by_name["poker-room-turn"]["misfire_grace_time"],
+            30,
+        )
 
     async def test_actor_action_after_restart_schedules_new_hand_instead_of_silent_ignore(self) -> None:
         context = FakeContext(self.config)
