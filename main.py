@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from telegram import Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
 from blackjack import blackjack_callback, blackjack_command
 from handlers import aces_command, on_mention
@@ -33,6 +33,34 @@ def configure_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def update_summary(update: object) -> str:
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    message = getattr(update, "effective_message", None)
+    callback = getattr(update, "callback_query", None)
+    text = ""
+    if message is not None:
+        raw_text = getattr(message, "text", None) or getattr(message, "caption", None)
+        if raw_text:
+            text = f" text={raw_text[:160]!r}"
+    callback_text = ""
+    if callback is not None and getattr(callback, "data", None):
+        callback_text = f" callback={callback.data[:120]!r}"
+    return (
+        f"update_id={getattr(update, 'update_id', None)} "
+        f"chat={getattr(chat, 'id', None)} "
+        f"chat_type={getattr(chat, 'type', None)} "
+        f"thread={getattr(message, 'message_thread_id', None) if message is not None else None} "
+        f"user={getattr(user, 'id', None)}"
+        f"{text}"
+        f"{callback_text}"
+    )
+
+
+async def log_update(update: Update, context) -> None:
+    log.info("Update received %s", update_summary(update))
+
+
 def main() -> None:
     configure_logging()
     token = os.environ.get("BOT_TOKEN")
@@ -54,6 +82,7 @@ def main() -> None:
         .build()
     )
 
+    app.add_handler(TypeHandler(Update, log_update), group=-100)
     app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT))
     app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT))
     app.add_handler(CommandHandler("blackjack", blackjack_command, filters=CHAT))
