@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -361,7 +362,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(message.reactions[-1][0], "👍")
 
-    async def test_current_actor_non_action_gets_polite_mention_prompt(self) -> None:
+    async def test_current_actor_table_talk_is_ignored_without_turn_prompt(self) -> None:
         context = FakeContext(self.config)
         room = poker_room_handlers.get_room(context)
         room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
@@ -371,9 +372,72 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage("думаю")
         await poker_room_handlers.poker_room_message(FakeUpdate(FakeUser(1, "alice", "Alice"), message=message), context)
 
+        self.assertEqual(message.reply_texts, [])
+        self.assertEqual(message.reactions, [])
+
+    async def test_current_actor_table_talk_near_timeout_gets_single_warning(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand()
+        hand.updated_at = time.time() - poker_room.TURN_TIMEOUT_SECONDS + 10
+
+        message = FakeMessage("думаю")
+        await poker_room_handlers.poker_room_message(
+            FakeUpdate(FakeUser(hand.to_act_user_id, "alice", "Alice"), message=message),
+            context,
+        )
+
         self.assertEqual(len(message.reply_texts), 1)
+        self.assertIn("до автофолда", message.reply_texts[0][0])
         self.assertIn("@alice", message.reply_texts[0][0])
         self.assertIn("твой ход", message.reply_texts[0][0].lower())
+        self.assertEqual(message.reactions, [])
+
+    async def test_near_timeout_warning_is_throttled_per_actor_turn(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand()
+        hand.updated_at = time.time() - poker_room.TURN_TIMEOUT_SECONDS + 10
+        actor = hand.to_act_user_id
+        user = FakeUser(actor, "alice", "Alice")
+        first = FakeMessage("думаю")
+        second = FakeMessage("все еще думаю")
+
+        await poker_room_handlers.poker_room_message(FakeUpdate(user, message=first), context)
+        await poker_room_handlers.poker_room_message(FakeUpdate(user, message=second), context)
+
+        self.assertEqual(len(first.reply_texts), 1)
+        self.assertEqual(second.reply_texts, [])
+
+    async def test_low_confidence_action_parse_is_treated_as_table_talk(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand()
+        original_pot = hand.pot
+
+        async def low_confidence_parser(*args, **kwargs):
+            return poker_room_llm.ParsedIntent(
+                kind="poker_action",
+                action=poker_room.PlayerAction("call"),
+                confidence=0.2,
+            )
+
+        message = FakeMessage("походу надо колить когда-нибудь")
+        with patch.object(poker_room_handlers.poker_room_llm, "parse_with_fallback", low_confidence_parser):
+            await poker_room_handlers.poker_room_message(
+                FakeUpdate(FakeUser(hand.to_act_user_id, "alice", "Alice"), message=message),
+                context,
+            )
+
+        self.assertEqual(hand.pot, original_pot)
+        self.assertEqual(message.reply_texts, [])
+        self.assertEqual(message.reactions, [])
 
     async def test_ended_hand_sends_final_message_and_schedules_next_deal(self) -> None:
         context = FakeContext(self.config)
@@ -541,7 +605,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         room = poker_room_handlers.get_room(context)
         self.assertEqual(room.seats, {})
 
-    async def test_turn_nudge_is_throttled_per_actor(self) -> None:
+    async def test_current_actor_repeated_table_talk_stays_silent(self) -> None:
         context = FakeContext(self.config)
         room = poker_room_handlers.get_room(context)
         room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
@@ -556,7 +620,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         await poker_room_handlers.poker_room_message(FakeUpdate(user, message=first), context)
         await poker_room_handlers.poker_room_message(FakeUpdate(user, message=second), context)
 
-        self.assertEqual(len(first.reply_texts), 1)
+        self.assertEqual(len(first.reply_texts), 0)
         self.assertEqual(len(second.reply_texts), 0)
 
     async def test_admin_reset_clears_room_state(self) -> None:

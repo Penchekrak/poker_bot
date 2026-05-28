@@ -29,7 +29,8 @@ ADMIN_OPEN = "open"
 ADMIN_CLOSE = "close"
 ADMIN_RESET = "reset"
 RENDER_KEEP_SECONDS = 600
-NUDGE_COOLDOWN_SECONDS = 5.0
+ACTION_CONFIDENCE_THRESHOLD = 0.70
+TURN_NUDGE_WINDOW_SECONDS = 30.0
 
 ENGINE_ERROR_RU: dict[str, str] = {
     "check is not legal facing a bet": "Сейчас нельзя чек: есть бет, нужен колл или фолд.",
@@ -146,7 +147,11 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             hand,
             recent_public_messages=context.bot_data.get("poker_room_recent_messages", []),
         )
-        if parsed.kind == "poker_action" and parsed.action is not None:
+        if (
+            parsed.kind == "poker_action"
+            and parsed.action is not None
+            and parsed.confidence >= ACTION_CONFIDENCE_THRESHOLD
+        ):
             try:
                 result = hand.apply_action(user.id, parsed.action)
             except poker_room.PokerActionError as exc:
@@ -161,8 +166,8 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 _schedule_turn_timeout(context, hand)
             return
-        if _should_send_turn_nudge(context, hand, user.id):
-            await message.reply_text(_turn_prompt(hand), parse_mode=ParseMode.HTML)
+        if _should_send_timeout_nudge(context, hand):
+            await message.reply_text(_timeout_nudge_prompt(hand), parse_mode=ParseMode.HTML)
         return
 
     parsed_room = await poker_room_llm.parse_room_intent_with_fallback(
@@ -701,7 +706,7 @@ def _format_card_text(card: str) -> str:
     return f"{rank}{_SUIT_TO_UNICODE.get(suit, suit)}"
 
 
-def _turn_prompt(hand: poker_room.PokerHand) -> str:
+def _timeout_nudge_prompt(hand: poker_room.PokerHand) -> str:
     actor_id = hand.to_act_user_id
     if actor_id is None:
         return "Раздача ждет следующего действия."
@@ -716,26 +721,30 @@ def _turn_prompt(hand: poker_room.PokerHand) -> str:
     if legal.get("min_raise_to"):
         options.append(f"рейз до {legal['min_raise_to']}+")
     options.append("олл-ин")
-    suffix = ""
-    call_amount = int(legal.get("call_amount") or 0)
-    if call_amount > 0:
-        pot = hand.pot
-        odds = f", шансы 1 к {pot // call_amount}" if call_amount and pot >= call_amount else ""
-        suffix = f" (банк {pot}, нужно {call_amount}{odds})"
-    return f"Пожалуйста, {mention}, твой ход: {html.escape(', '.join(options))}{html.escape(suffix)}."
+
+    remaining = int(max(1.0, round(_turn_seconds_remaining(hand))))
+    timeout_action = "автофолда" if int(legal.get("call_amount") or 0) > 0 else "авточека"
+    return (
+        f"Осталось около {remaining} сек до {timeout_action}. "
+        f"{mention}, твой ход: {html.escape(', '.join(options))}."
+    )
 
 
-def _should_send_turn_nudge(context, hand: poker_room.PokerHand, user_id: int) -> bool:
-    key = "poker_room_last_nudge"
-    last = context.bot_data.get(key)
-    now = time.monotonic()
-    fingerprint = (hand.hand_id, hand.to_act_user_id, user_id)
-    if isinstance(last, tuple) and len(last) == 2:
-        prev_fingerprint, prev_at = last
-        if prev_fingerprint == fingerprint and now - prev_at < NUDGE_COOLDOWN_SECONDS:
-            return False
-    context.bot_data[key] = (fingerprint, now)
+def _should_send_timeout_nudge(context, hand: poker_room.PokerHand) -> bool:
+    if hand.status != poker_room.STATUS_BETTING or hand.to_act_user_id is None:
+        return False
+    if _turn_seconds_remaining(hand) > TURN_NUDGE_WINDOW_SECONDS:
+        return False
+    key = "poker_room_last_timeout_nudge"
+    fingerprint = (hand.hand_id, hand.to_act_user_id, hand.updated_at)
+    if context.bot_data.get(key) == fingerprint:
+        return False
+    context.bot_data[key] = fingerprint
     return True
+
+
+def _turn_seconds_remaining(hand: poker_room.PokerHand) -> float:
+    return max(0.0, poker_room.TURN_TIMEOUT_SECONDS - (time.time() - hand.updated_at))
 
 
 def _seat_mention(seat: poker_room.Seat | None, user_id: int, fallback_name: str) -> str:
