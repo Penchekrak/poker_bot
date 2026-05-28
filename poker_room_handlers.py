@@ -137,15 +137,15 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parsed_room.confidence,
         )
         markup = _confirmation_markup(parsed_room.room_intent, user.id)
-        await message.reply_text("Подтверди.", reply_markup=markup)
+        await _send_room_text(context, "Подтверди.", reply_markup=markup)
         return
 
     admin_intent = _admin_intent_from_text(message.text)
     if admin_intent:
         if user.id not in config.admin_user_ids:
-            await message.reply_text("Только админ стола.")
+            await _send_room_text(context, "Только админ стола.")
             return
-        await message.reply_text("Подтверди.", reply_markup=_admin_confirmation_markup(admin_intent, user.id))
+        await _send_room_text(context, "Подтверди.", reply_markup=_admin_confirmation_markup(admin_intent, user.id))
         return
 
     return
@@ -160,14 +160,14 @@ async def poker_room_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if message is None or user is None:
         return
     if user.id not in config.admin_user_ids:
-        await message.reply_text("Только админ стола.")
+        await _send_room_text(context, "Только админ стола.")
         return
     room = get_room(context)
     room.is_open = True
     _save_room(context, room)
     _schedule_auto_deal(context)
     log.info("Poker room opened by admin user=%s chat=%s", user.id, config.chat_id)
-    await message.reply_text("Стол открыт.")
+    await _send_room_text(context, "Стол открыт.")
 
 
 async def poker_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -300,6 +300,20 @@ def _allowed_callback(query, config: RoomConfig) -> bool:
         query.message.chat_id == config.chat_id
         and (config.thread_id is None or getattr(query.message, "message_thread_id", None) == config.thread_id)
     )
+
+
+async def _send_room_text(context, text: str, reply_markup=None) -> None:
+    config = _config(context)
+    if config is None:
+        return
+    kwargs = {
+        "chat_id": config.chat_id,
+        "text": text,
+        "reply_markup": reply_markup,
+    }
+    if config.thread_id is not None:
+        kwargs["message_thread_id"] = config.thread_id
+    await context.bot.send_message(**kwargs)
 
 
 def _room_intent_from_text(text: str) -> str | None:
