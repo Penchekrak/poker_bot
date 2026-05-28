@@ -153,8 +153,7 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await message.reply_text(_translate_engine_error(exc))
                 return
             await _confirm_reaction(message)
-            if hand.status == poker_room.STATUS_ENDED:
-                _save_room(context, room)
+            _save_room(context, room)
             await _render_room(context, hand, force_new=result.new_cards)
             if hand.status == poker_room.STATUS_ENDED:
                 await _send_final_message(context, hand, result)
@@ -506,8 +505,7 @@ async def _apply_due_timeout(
     result = hand.apply_timeout(now=hand.updated_at + poker_room.TURN_TIMEOUT_SECONDS if force else None)
     if result.kind in {"waiting", "invalid"}:
         return
-    if hand.status == poker_room.STATUS_ENDED:
-        _save_room(context, room)
+    _save_room(context, room)
     await _render_room(context, hand, force_new=result.new_cards)
     if hand.status == poker_room.STATUS_ENDED:
         await _send_final_message(context, hand, result)

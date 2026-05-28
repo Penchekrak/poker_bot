@@ -22,6 +22,7 @@ BIG_BLIND: Final[int] = 100
 MAX_SEATS: Final[int] = 10
 TURN_TIMEOUT_SECONDS: Final[float] = 120.0
 AUTO_DEAL_SECONDS: Final[float] = 15.0
+AUTO_SIT_OUT_TIMEOUTS: Final[int] = 2
 
 ROOM_JOIN: Final[str] = "join"
 ROOM_REBUY: Final[str] = "rebuy"
@@ -73,6 +74,7 @@ class Seat:
     stack: int = STARTING_STACK
     sitting_out: bool = False
     leave_next_hand: bool = False
+    auto_timeout_count: int = 0
     last_rebuy_date: str | None = None
 
     def public_dict(self) -> dict[str, object]:
@@ -83,6 +85,7 @@ class Seat:
             "stack": self.stack,
             "sitting_out": self.sitting_out,
             "leave_next_hand": self.leave_next_hand,
+            "auto_timeout_count": self.auto_timeout_count,
             "last_rebuy_date": self.last_rebuy_date,
         }
 
@@ -95,6 +98,7 @@ class Seat:
             stack=int(data.get("stack", STARTING_STACK)),
             sitting_out=bool(data.get("sitting_out", False)),
             leave_next_hand=bool(data.get("leave_next_hand", False)),
+            auto_timeout_count=max(0, int(data.get("auto_timeout_count", 0))),
             last_rebuy_date=data.get("last_rebuy_date") if isinstance(data.get("last_rebuy_date"), str) else None,
         )
 
@@ -178,11 +182,13 @@ class PokerRoom:
         if intent == ROOM_SIT_OUT:
             seat = self._require_seat(user_id)
             seat.sitting_out = True
+            seat.auto_timeout_count = 0
             return GameResult("room", "Сядешь вне игры со следующей раздачи.")
         if intent == ROOM_LEAVE:
             seat = self._require_seat(user_id)
             seat.leave_next_hand = True
             seat.sitting_out = True
+            seat.auto_timeout_count = 0
             if self.current_hand is None or self.current_hand.status == STATUS_ENDED:
                 self._remove_left_seats()
             return GameResult("room", "Выход из-за стола принят.")
@@ -195,6 +201,7 @@ class PokerRoom:
                 return GameResult("rejected", "Ребай доступен после нуля.")
             seat.stack = STARTING_STACK
             seat.sitting_out = False
+            seat.auto_timeout_count = 0
             seat.last_rebuy_date = today
             return GameResult("room", "Ребай 10 000 принят.")
         raise PokerRoomError("unknown room intent")
@@ -276,6 +283,7 @@ class PokerRoom:
             seat.name = name
             seat.sitting_out = False
             seat.leave_next_hand = False
+            seat.auto_timeout_count = 0
             return GameResult("room", "Ты снова в игре.")
         if not self.is_open:
             raise PokerRoomError("стол закрыт")
@@ -388,7 +396,14 @@ class PokerHand:
             "all_in_to": max_total,
         }
 
-    def apply_action(self, user_id: int, action: PlayerAction, now: float | None = None) -> GameResult:
+    def apply_action(
+        self,
+        user_id: int,
+        action: PlayerAction,
+        now: float | None = None,
+        *,
+        automatic: bool = False,
+    ) -> GameResult:
         self._assert_can_act(user_id)
         actor = self.players[user_id]
         call_amount = max(0, self.current_bet - actor.street_bet)
@@ -398,6 +413,8 @@ class PokerHand:
             actor.folded = True
             actor.acted = True
             self.public_log.append(f"{actor.name}: фолд")
+            if not automatic:
+                self._reset_auto_timeout_count(user_id)
             return self._after_action(now)
 
         if action.action == "check":
@@ -405,6 +422,8 @@ class PokerHand:
                 raise PokerActionError("check is not legal facing a bet")
             actor.acted = True
             self.public_log.append(f"{actor.name}: чек")
+            if not automatic:
+                self._reset_auto_timeout_count(user_id)
             return self._after_action(now)
 
         if action.action == "call":
@@ -415,6 +434,8 @@ class PokerHand:
                 paid = self._commit_to(user_id, actor.street_bet + call_amount)
                 actor.acted = True
                 self.public_log.append(f"{actor.name}: колл {paid}")
+            if not automatic:
+                self._reset_auto_timeout_count(user_id)
             return self._after_action(now)
 
         target = self._target_for_action(actor, action)
@@ -439,6 +460,8 @@ class PokerHand:
                 self.public_log.append(f"{actor.name}: рейз до {target}")
         else:
             self.public_log.append(f"{actor.name}: колл {paid}")
+        if not automatic:
+            self._reset_auto_timeout_count(user_id)
         return self._after_action(now)
 
     def apply_timeout(self, now: float | None = None) -> GameResult:
@@ -448,8 +471,11 @@ class PokerHand:
         if _coerce_now(now) - self.updated_at < TURN_TIMEOUT_SECONDS:
             return GameResult("waiting", "Время еще не вышло.")
         if self.current_bet <= actor.street_bet:
-            return self.apply_action(actor.user_id, PlayerAction("check"), now=now)
-        return self.apply_action(actor.user_id, PlayerAction("fold"), now=now)
+            result = self.apply_action(actor.user_id, PlayerAction("check"), now=now, automatic=True)
+        else:
+            result = self.apply_action(actor.user_id, PlayerAction("fold"), now=now, automatic=True)
+        self._record_auto_timeout(actor.user_id)
+        return result
 
     def choose_public_reveal(self, user_id: int, reveal: bool) -> GameResult:
         if self.status != STATUS_ENDED:
@@ -819,6 +845,20 @@ class PokerHand:
             if seat.stack <= 0:
                 seat.stack = 0
                 seat.sitting_out = True
+
+    def _record_auto_timeout(self, user_id: int) -> None:
+        seat = self.room.seats.get(user_id)
+        if seat is None:
+            return
+        seat.auto_timeout_count += 1
+        if seat.auto_timeout_count >= AUTO_SIT_OUT_TIMEOUTS:
+            seat.sitting_out = True
+            self.public_log.append(f"{seat.name}: ситаут после автоходов")
+
+    def _reset_auto_timeout_count(self, user_id: int) -> None:
+        seat = self.room.seats.get(user_id)
+        if seat is not None:
+            seat.auto_timeout_count = 0
 
     def _normalize_to_act_after_forced_commits(self, now: float | None = None) -> None:
         actor_id = self.to_act_user_id

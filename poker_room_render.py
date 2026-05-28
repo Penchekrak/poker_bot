@@ -14,7 +14,15 @@ import poker_room
 WIDTH = 1920
 HEIGHT = 1200
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "poker_table"
-FONT_PATH: Final[Path] = ASSET_DIR / "cyrillic-minecraft-font.ttf"
+LATIN_FONT_PATH: Final[Path] = ASSET_DIR / "Minecraft.ttf"
+CYRILLIC_FONT_PATH: Final[Path] = ASSET_DIR / "cyrillic-minecraft-font.ttf"
+FONT_PATH: Final[Path] = CYRILLIC_FONT_PATH
+SEAT_BOX_W: Final[int] = 330
+SEAT_BOX_H: Final[int] = 220
+SEAT_CARD_W: Final[int] = 82
+SEAT_CARD_H: Final[int] = 114
+BOARD_CARD_W: Final[int] = 130
+BOARD_CARD_H: Final[int] = 180
 
 STREET_LABELS_RU: Final[dict[str, str]] = {
     poker_room.STREET_PREFLOP: "ПРЕФЛОП",
@@ -23,26 +31,6 @@ STREET_LABELS_RU: Final[dict[str, str]] = {
     poker_room.STREET_RIVER: "РИВЕР",
     poker_room.STREET_SHOWDOWN: "ВСКРЫТИЕ",
 }
-
-_SAFE_CHAR_REPLACEMENTS: Final[dict[str, str]] = {
-    ":": " ",
-    "-": " ",
-    "—": " ",
-    "–": " ",
-    "/": " ",
-    "|": " ",
-    "(": " ",
-    ")": " ",
-    "[": " ",
-    "]": " ",
-    "+": " ",
-    "=": " ",
-    "·": " ",
-    "•": " ",
-    "*": " ",
-    "#": " ",
-}
-
 
 @dataclass(frozen=True)
 class Box:
@@ -83,23 +71,36 @@ class RenderResult:
     seat_boxes: dict[int, Box]
 
 
+@dataclass(frozen=True)
+class TableFont:
+    latin: ImageFont.ImageFont
+    cyrillic: ImageFont.ImageFont
+
+    def for_char(self, char: str) -> ImageFont.ImageFont:
+        codepoint = ord(char)
+        if 0x0400 <= codepoint <= 0x052F:
+            return self.cyrillic
+        return self.latin
+
+
 def layout_seat_boxes(count: int, width: int = WIDTH, height: int = HEIGHT) -> dict[int, Box]:
     if count < 2 or count > poker_room.MAX_SEATS:
         raise ValueError("seat count must be between 2 and 10")
-    box_w = 260
-    box_h = 156
+    box_w = SEAT_BOX_W
+    box_h = SEAT_BOX_H
     center_x = width // 2
     center_y = height // 2
-    radius_x = width // 2 - box_w // 2 - 56
-    radius_y = height // 2 - box_h // 2 - 60
+    margin = 18
+    radius_x = width // 2 - box_w // 2 - 30
+    radius_y = height // 2 - box_h // 2 - 24
     boxes: dict[int, Box] = {}
     for index in range(count):
         angle = -math.pi / 2 + (2 * math.pi * index / count)
         x = int(center_x + math.cos(angle) * radius_x - box_w / 2)
         y = int(center_y + math.sin(angle) * radius_y - box_h / 2)
         boxes[index] = Box(
-            x=max(10, min(width - box_w - 10, x)),
-            y=max(10, min(height - box_h - 10, y)),
+            x=max(margin, min(width - box_w - margin, x)),
+            y=max(margin, min(height - box_h - margin, y)),
             w=box_w,
             h=box_h,
         )
@@ -110,14 +111,14 @@ def render_table_png(hand: poker_room.PokerHand, path: str | Path) -> RenderResu
     output = Path(path)
     image = Image.new("RGBA", (WIDTH, HEIGHT), "#1f2937ff")
     draw = ImageDraw.Draw(image)
-    font_big = _font(36)
-    font = _font(22)
-    font_small = _font(16)
+    font_banner = _font(22)
+    font = _font(24)
+    font_small = _font(18)
 
     _draw_table(draw)
-    _draw_banner(draw, _status_text(hand), font)
+    _draw_banner(draw, _status_text(hand), font_banner)
     _draw_action_log(draw, hand, font_small)
-    _draw_board(image, draw, hand, font_big)
+    _draw_board(image, draw, hand)
     _draw_pot(image, draw, hand, font)
 
     seat_boxes = layout_seat_boxes(len(hand.order))
@@ -137,22 +138,22 @@ def _draw_table(draw: ImageDraw.ImageDraw) -> None:
     draw.ellipse((368, 390, WIDTH - 368, HEIGHT - 352), outline="#5d9fb5", width=6)
 
 
-def _draw_banner(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> None:
-    box = Box(540, 295, 840, 70)
+def _draw_banner(draw: ImageDraw.ImageDraw, text: str, font: TableFont) -> None:
+    box = Box(540, 340, 840, 70)
     _pixel_rect(draw, box, "#2f3f54", "#f7f0d6", shadow=True)
     _center_text(draw, box, text, font, "#f7f0d6")
 
 
-def _draw_action_log(draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: ImageFont.ImageFont) -> None:
+def _draw_action_log(draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: TableFont) -> None:
     log_lines = [line for line in hand.public_log if not _is_board_log_line(line)]
     if not log_lines:
         return
-    y = 380
+    y = 425
     for line in log_lines[-3:]:
         safe = _font_safe(line)
         truncated = _truncate_to_width(safe, font, 760)
-        draw.text((580, y), truncated, font=font, fill="#dfe7f5")
-        y += 24
+        _draw_text(draw, (580, y), truncated, font, "#dfe7f5")
+        y += 30
 
 
 def _is_board_log_line(line: str) -> bool:
@@ -162,12 +163,12 @@ def _is_board_log_line(line: str) -> bool:
     return head in {"флоп", "терн", "ривер"}
 
 
-def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: ImageFont.ImageFont) -> None:
-    card_w, card_h = 114, 168
-    gap = 15
+def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand) -> None:
+    card_w, card_h = BOARD_CARD_W, BOARD_CARD_H
+    gap = 18
     total = card_w * 5 + gap * 4
     start_x = (WIDTH - total) // 2
-    y = 478
+    y = 480
     cards = list(hand.board)
     while len(cards) < 5:
         cards.append("__back__")
@@ -179,8 +180,8 @@ def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.
         )
 
 
-def _draw_pot(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: ImageFont.ImageFont) -> None:
-    pot_box = Box(680, 688, 560, 70)
+def _draw_pot(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: TableFont) -> None:
+    pot_box = Box(680, 710, 560, 72)
     _pixel_rect(draw, pot_box, "#98c7da", "#172333", shadow=True)
     chip = _asset("ChipRed.png").resize((42, 42), Image.Resampling.NEAREST)
     image.alpha_composite(chip, (pot_box.x + 24, pot_box.y + 14))
@@ -193,7 +194,7 @@ def _draw_pot(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.Po
     _draw_side_pots(image, draw, hand, font)
 
 
-def _draw_side_pots(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: ImageFont.ImageFont) -> None:
+def _draw_side_pots(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: TableFont) -> None:
     if len(hand.side_pots) <= 1:
         return
     y = 770
@@ -213,8 +214,8 @@ def _draw_seat(
     hand: poker_room.PokerHand,
     user_id: int,
     box: Box,
-    font: ImageFont.ImageFont,
-    font_small: ImageFont.ImageFont,
+    font: TableFont,
+    font_small: TableFont,
 ) -> None:
     player = hand.players[user_id]
     border = "#b7f59a" if user_id == hand.to_act_user_id else "#f7f0d6"
@@ -226,26 +227,29 @@ def _draw_seat(
         border = "#f0b35a"
     _pixel_rect(draw, box, fill, border, shadow=True)
 
-    name_width = box.w - 24 - (96 if player.street_bet else 0)
+    name_width = box.w - 24 - (112 if player.street_bet else 0)
     name = _fit_text(player.name, font, name_width)
-    _center_text(draw, Box(box.x + 12, box.y + 8, box.w - 24, 24), name, font, "#f7f0d6")
+    _center_text(draw, Box(box.x + 12, box.y + 8, box.w - 24, 36), name, font, "#f7f0d6")
 
-    card_y = box.y + 38
-    card_1 = _seat_card_asset(hand, player, 0).resize((50, 74), Image.Resampling.NEAREST)
-    card_2 = _seat_card_asset(hand, player, 1).resize((50, 74), Image.Resampling.NEAREST)
-    image.alpha_composite(card_1, (box.center_x - 54, card_y))
-    image.alpha_composite(card_2, (box.center_x + 4, card_y))
+    card_y = box.y + 52
+    card_gap = 12
+    card_1 = _seat_card_asset(hand, player, 0).resize((SEAT_CARD_W, SEAT_CARD_H), Image.Resampling.NEAREST)
+    card_2 = _seat_card_asset(hand, player, 1).resize((SEAT_CARD_W, SEAT_CARD_H), Image.Resampling.NEAREST)
+    first_card_x = box.center_x - (SEAT_CARD_W * 2 + card_gap) // 2
+    second_card_x = first_card_x + SEAT_CARD_W + card_gap
+    image.alpha_composite(card_1, (first_card_x, card_y))
+    image.alpha_composite(card_2, (second_card_x, card_y))
     if player.folded:
-        _draw_fold_overlay(draw, box.center_x - 54, card_y, 50, 74)
-        _draw_fold_overlay(draw, box.center_x + 4, card_y, 50, 74)
+        _draw_fold_overlay(draw, first_card_x, card_y, SEAT_CARD_W, SEAT_CARD_H)
+        _draw_fold_overlay(draw, second_card_x, card_y, SEAT_CARD_W, SEAT_CARD_H)
 
-    bottom_label_box = Box(box.x + 16, box.y + box.h - 36, box.w - 32, 28)
+    bottom_label_box = Box(box.x + 16, box.y + box.h - 48, box.w - 32, 36)
     _pixel_rect(draw, bottom_label_box, "#263342", "#f7f0d6")
     bottom_text = _seat_bottom_text(player, hand.status == poker_room.STATUS_ENDED)
     _center_text(draw, bottom_label_box, bottom_text, font_small, "#f7f0d6")
 
     if player.street_bet:
-        bet_box = Box(box.x + box.w - 92, box.y - 18, 104, 40)
+        bet_box = Box(box.x + box.w - 104, box.y - 18, 116, 42)
         _pixel_rect(draw, bet_box, "#f0b35a", "#172333")
         _center_text(draw, bet_box, str(player.street_bet), font_small, "#172333")
 
@@ -265,7 +269,7 @@ def _draw_seat_role_badge(
     hand: poker_room.PokerHand,
     user_id: int,
     box: Box,
-    font: ImageFont.ImageFont,
+    font: TableFont,
 ) -> None:
     badges: list[tuple[str, str, str]] = []
     if user_id == hand.button_user_id:
@@ -276,11 +280,23 @@ def _draw_seat_role_badge(
         badges.append(("ББ", "#dfe7f5", "#172333"))
     if not badges:
         return
-    size = 44
+    size = 46
     gap = 6
     total = len(badges) * size + (len(badges) - 1) * gap
-    start_x = box.center_x - total // 2
-    badge_y = box.bottom - 6
+    if box.center_x > WIDTH * 0.68:
+        start_x = box.x - total - 6
+        badge_y = box.center_y - size // 2
+    elif box.center_x < WIDTH * 0.32:
+        start_x = box.right + 6
+        badge_y = box.center_y - size // 2
+    else:
+        start_x = box.center_x - total // 2
+        if box.center_y > HEIGHT * 0.72:
+            badge_y = box.y - size + 6
+        else:
+            badge_y = box.bottom - 6
+    start_x = max(8, min(WIDTH - total - 8, start_x))
+    badge_y = max(8, min(HEIGHT - size - 8, badge_y))
     for index, (label, fill, ink) in enumerate(badges):
         bx = start_x + index * (size + gap)
         draw.rectangle((bx + 4, badge_y + 4, bx + size + 4, badge_y + size + 4), fill="#00000055")
@@ -311,11 +327,14 @@ def _asset(name: str) -> Image.Image:
     return Image.open(ASSET_DIR / name).convert("RGBA")
 
 
-def _font(size: int) -> ImageFont.ImageFont:
+def _font(size: int) -> TableFont:
     try:
-        return ImageFont.truetype(str(FONT_PATH), size=size)
+        latin = ImageFont.truetype(str(LATIN_FONT_PATH), size=size)
+        cyrillic = ImageFont.truetype(str(CYRILLIC_FONT_PATH), size=max(8, round(size * 2 / 3)))
+        return TableFont(latin=latin, cyrillic=cyrillic)
     except OSError:
-        return ImageFont.load_default()
+        fallback = ImageFont.load_default()
+        return TableFont(latin=fallback, cyrillic=fallback)
 
 
 def _pixel_rect(
@@ -334,13 +353,13 @@ def _center_text(
     draw: ImageDraw.ImageDraw,
     box: Box,
     text: str,
-    font: ImageFont.ImageFont,
+    font: TableFont,
     fill: str,
 ) -> None:
-    bbox = draw.textbbox((0, 0), text, font=font)
+    bbox = _text_bbox(text, font)
     x = box.x + (box.w - (bbox[2] - bbox[0])) // 2 - bbox[0]
     y = box.y + (box.h - (bbox[3] - bbox[1])) // 2 - bbox[1]
-    draw.text((x, y), text, font=font, fill=fill)
+    _draw_text(draw, (x, y), text, font, fill)
 
 
 def _status_text(hand: poker_room.PokerHand) -> str:
@@ -355,11 +374,11 @@ def _status_text(hand: poker_room.PokerHand) -> str:
     return f"{street}    ХОД {actor_text}    КОЛЛ {owed}"
 
 
-def _fit_text(text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+def _fit_text(text: str, font: TableFont, max_width: int) -> str:
     return _truncate_to_width(_font_safe(text), font, max_width)
 
 
-def _truncate_to_width(text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+def _truncate_to_width(text: str, font: TableFont, max_width: int) -> str:
     if _text_width(text, font) <= max_width:
         return text
     ellipsis = "."
@@ -369,33 +388,61 @@ def _truncate_to_width(text: str, font: ImageFont.ImageFont, max_width: int) -> 
     return (body + ellipsis) if body else ellipsis
 
 
-def _text_width(text: str, font: ImageFont.ImageFont) -> int:
-    try:
-        return int(font.getlength(text))
-    except AttributeError:
-        bbox = font.getbbox(text)
-        return bbox[2] - bbox[0]
+def _text_width(text: str, font: TableFont) -> int:
+    width = 0.0
+    for char in text:
+        selected = font.for_char(char)
+        try:
+            width += selected.getlength(char)
+        except AttributeError:
+            bbox = selected.getbbox(char)
+            width += bbox[2] - bbox[0]
+    return int(round(width))
+
+
+def _text_bbox(text: str, font: TableFont) -> tuple[int, int, int, int]:
+    width = _text_width(text, font)
+    if not text:
+        return (0, 0, 0, 0)
+    top = 0
+    bottom = 0
+    for char in text:
+        if char.isspace():
+            continue
+        bbox = font.for_char(char).getbbox(char)
+        top = min(top, bbox[1])
+        bottom = max(bottom, bbox[3])
+    if bottom == 0:
+        bbox = font.latin.getbbox("M")
+        top = bbox[1]
+        bottom = bbox[3]
+    return (0, top, width, bottom)
+
+
+def _draw_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: TableFont,
+    fill: str,
+) -> None:
+    x, y = xy
+    for char in text:
+        selected = font.for_char(char)
+        draw.text((x, y), char, font=selected, fill=fill)
+        try:
+            x += int(round(selected.getlength(char)))
+        except AttributeError:
+            bbox = selected.getbbox(char)
+            x += bbox[2] - bbox[0]
 
 
 def _font_safe(text: str) -> str:
-    """Replace characters that the bundled pixel font doesn't render with safe equivalents.
-
-    The cyrillic-minecraft-font.ttf bundled in assets only covers Latin/Cyrillic letters,
-    digits, space, and the punctuation `.,!?`. Anything else (colons, hyphens, brackets,
-    bullets) is drawn as a blank tofu, so we substitute it before any draw call that
-    sources its content from public game log or user-provided names.
-    """
+    """Normalize user/log text before measuring and drawing it."""
 
     if not text:
         return ""
-    out_chars = []
-    for char in text:
-        replacement = _SAFE_CHAR_REPLACEMENTS.get(char)
-        if replacement is not None:
-            out_chars.append(replacement)
-        else:
-            out_chars.append(char)
-    collapsed = "".join(out_chars)
+    collapsed = " ".join(text.split())
     while "  " in collapsed:
         collapsed = collapsed.replace("  ", " ")
     return collapsed.strip()

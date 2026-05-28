@@ -166,6 +166,42 @@ class PokerRoomEngineTests(unittest.TestCase):
         self.assertEqual(hand.apply_timeout(now=1_243.0).kind, "advanced")
         self.assertEqual(hand.street, poker_room.STREET_FLOP)
 
+    def test_repeated_timeouts_mark_player_sitting_out_for_next_hand(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+
+        first_hand = room.start_hand(now=1_010.0)
+        first_hand.apply_timeout(now=1_131.0)
+
+        self.assertEqual(room.seats[1].auto_timeout_count, 1)
+        self.assertFalse(room.seats[1].sitting_out)
+
+        second_hand = room.start_hand(now=1_200.0)
+        second_hand.apply_action(2, poker_room.PlayerAction("raise_to", 300), now=1_201.0)
+        second_hand.apply_timeout(now=1_322.0)
+
+        self.assertEqual(room.seats[1].auto_timeout_count, poker_room.AUTO_SIT_OUT_TIMEOUTS)
+        self.assertTrue(room.seats[1].sitting_out)
+        with self.assertRaises(poker_room.PokerRoomError):
+            room.start_hand(now=1_400.0)
+
+    def test_manual_action_resets_auto_timeout_count(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+
+        first_hand = room.start_hand(now=1_010.0)
+        first_hand.apply_timeout(now=1_131.0)
+        self.assertEqual(room.seats[1].auto_timeout_count, 1)
+
+        second_hand = room.start_hand(now=1_200.0)
+        second_hand.apply_action(2, poker_room.PlayerAction("raise_to", 300), now=1_201.0)
+        second_hand.apply_action(1, poker_room.PlayerAction("fold"), now=1_202.0)
+
+        self.assertEqual(room.seats[1].auto_timeout_count, 0)
+        self.assertFalse(room.seats[1].sitting_out)
+
     def test_closed_room_rejects_new_seats_and_new_hands(self) -> None:
         room = poker_room.PokerRoom(now=1_000.0)
         room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
