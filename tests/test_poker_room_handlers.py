@@ -107,6 +107,22 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.reply_texts, [])
         self.assertEqual(context.bot.sent_photos, [])
 
+    async def test_chat_only_room_accepts_any_topic_in_configured_chat(self) -> None:
+        chat_only_config = poker_room_handlers.RoomConfig(
+            chat_id=10,
+            thread_id=None,
+            admin_user_ids={1},
+            state_path=self.config.state_path,
+            render_dir=self.config.render_dir,
+        )
+        context = FakeContext(chat_only_config)
+        message = FakeMessage("сяду", chat_id=10, thread_id=999)
+        update = FakeUpdate(FakeUser(1, "alice", "Alice"), message=message)
+
+        await poker_room_handlers.poker_room_message(update, context)
+
+        self.assertIn("подтверди", message.reply_texts[0][0].lower())
+
     async def test_join_text_requires_confirmation_then_persists_and_schedules_deal(self) -> None:
         context = FakeContext(self.config)
         user = FakeUser(1, "alice", "Alice")

@@ -2,14 +2,14 @@
 
 ## Summary
 
-Build a single no-limit Hold'em cash-table room for one configured Telegram group forum topic. The room supports 2-10 seated players, chat-based betting parsed by an OpenAI-compatible JSON-only LLM, private hole-card callback alerts, timed turn auto-actions, persistent public stacks/seats, and an 8-bit round-table public render.
+Build a single no-limit Hold'em cash-table room for one configured Telegram group, optionally narrowed to one forum topic. The room supports 2-10 seated players, chat-based betting parsed by an OpenAI-compatible JSON-only LLM, private hole-card callback alerts, timed turn auto-actions, persistent public stacks/seats, and an 8-bit round-table public render.
 
 The existing `/heads_up`, `/blackjack`, and `/aces_please` features stay unchanged.
 
 ## Configuration
 
 - `POKER_ROOM_CHAT_ID`: required chat id for the room.
-- `POKER_ROOM_THREAD_ID`: required forum topic id for the room.
+- `POKER_ROOM_THREAD_ID`: optional forum topic id for the room; omit for chat-wide gating.
 - `POKER_ADMIN_USER_IDS`: comma-separated user ids allowed to reset/open/close the room.
 - `POKER_STATE_PATH`: optional, defaults to `data/poker_room_state.json`.
 - `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`: optional OpenAI-compatible JSON parser/commentary endpoint settings.

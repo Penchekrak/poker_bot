@@ -9,10 +9,11 @@ Texas Hold'em mini-game.
 - `/heads_up @username` starts a two-player in-chat Hold'em table.
 - `/blackjack` starts a one-player blackjack table. Each chat can have one active blackjack table.
 - Mentioning the bot in a group triggers the same random-hand response.
-- A forum-scoped chat poker room can be enabled with `POKER_ROOM_CHAT_ID` and
-  `POKER_ROOM_THREAD_ID`. Players join/rebuy/sit out via topic messages, view
-  private cards via callback alerts, and act in chat. Configured poker admins
-  can use `открыть стол`, `закрыть стол`, and `сбросить стол` inside that topic.
+- A chat-scoped poker room can be enabled with `POKER_ROOM_CHAT_ID`; set
+  `POKER_ROOM_THREAD_ID` only when it should be limited to one forum topic.
+  Players join/rebuy/sit out via chat messages, view private cards via callback
+  alerts, and act in chat. Configured poker admins can use `открыть стол`,
+  `закрыть стол`, and `сбросить стол` inside the configured room.
 
 ## Requirements
 
@@ -30,9 +31,9 @@ export BOT_TOKEN=123456:replace-with-your-token
 
 The bot uses long polling and reads `BOT_TOKEN` from the environment. For local
 testing, you can also create an untracked `.env` file with `BOT_TOKEN=...`.
-The poker room additionally reads `POKER_ROOM_CHAT_ID`, `POKER_ROOM_THREAD_ID`,
-`POKER_ADMIN_USER_IDS`, `POKER_STATE_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and
-`LLM_MODEL` when that feature is enabled.
+The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
+`POKER_ROOM_THREAD_ID`, `POKER_ADMIN_USER_IDS`, `POKER_STATE_PATH`,
+`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that feature is enabled.
 
 ## Tests
 

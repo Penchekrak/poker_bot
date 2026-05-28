@@ -27,7 +27,7 @@ ADMIN_RESET = "reset"
 @dataclass(frozen=True)
 class RoomConfig:
     chat_id: int
-    thread_id: int
+    thread_id: int | None
     admin_user_ids: set[int]
     state_path: Path = Path("data/poker_room_state.json")
     render_dir: Path = Path(tempfile.gettempdir()) / "poker_room_renders"
@@ -36,7 +36,7 @@ class RoomConfig:
     def from_env(cls) -> "RoomConfig | None":
         raw_chat = os.environ.get("POKER_ROOM_CHAT_ID")
         raw_thread = os.environ.get("POKER_ROOM_THREAD_ID")
-        if not raw_chat or not raw_thread:
+        if not raw_chat:
             return None
         admins = {
             int(part.strip())
@@ -45,7 +45,7 @@ class RoomConfig:
         }
         return cls(
             chat_id=int(raw_chat),
-            thread_id=int(raw_thread),
+            thread_id=int(raw_thread) if raw_thread else None,
             admin_user_ids=admins,
             state_path=Path(os.environ.get("POKER_STATE_PATH", "data/poker_room_state.json")),
         )
@@ -239,14 +239,14 @@ def _allowed_message(update: Update, config: RoomConfig) -> bool:
         chat is not None
         and message is not None
         and chat.id == config.chat_id
-        and getattr(message, "message_thread_id", None) == config.thread_id
+        and (config.thread_id is None or getattr(message, "message_thread_id", None) == config.thread_id)
     )
 
 
 def _allowed_callback(query, config: RoomConfig) -> bool:
     return bool(
         query.message.chat_id == config.chat_id
-        and getattr(query.message, "message_thread_id", None) == config.thread_id
+        and (config.thread_id is None or getattr(query.message, "message_thread_id", None) == config.thread_id)
     )
 
 
@@ -361,14 +361,18 @@ async def _render_room(context, hand: poker_room.PokerHand, force_new: bool) -> 
                 reply_markup=markup,
             )
         return
+    send_kwargs = {
+        "chat_id": config.chat_id,
+        "caption": caption,
+        "parse_mode": ParseMode.HTML,
+        "reply_markup": markup,
+    }
+    if config.thread_id is not None:
+        send_kwargs["message_thread_id"] = config.thread_id
     with path.open("rb") as photo:
+        send_kwargs["photo"] = photo
         sent = await context.bot.send_photo(
-            chat_id=config.chat_id,
-            message_thread_id=config.thread_id,
-            photo=photo,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
+            **send_kwargs,
         )
     context.bot_data["poker_room_render_message_id"] = sent.message_id
 
