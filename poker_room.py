@@ -162,6 +162,8 @@ class PokerRoom:
         raise PokerRoomError("unknown room intent")
 
     def start_hand(self, now: float | None = None, deck: list[str] | None = None) -> "PokerHand":
+        if not self.is_open:
+            raise PokerRoomError("стол закрыт")
         if self.current_hand and self.current_hand.status != STATUS_ENDED:
             raise PokerRoomError("hand already active")
         self._remove_left_seats()
@@ -234,6 +236,8 @@ class PokerRoom:
             seat.sitting_out = False
             seat.leave_next_hand = False
             return GameResult("room", "Ты снова в игре.")
+        if not self.is_open:
+            raise PokerRoomError("стол закрыт")
         if len(self.seat_order) >= MAX_SEATS:
             raise SeatLimitError("стол заполнен")
         self.seats[user_id] = Seat(user_id=user_id, username=username, name=name)

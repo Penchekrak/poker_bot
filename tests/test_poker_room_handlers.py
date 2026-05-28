@@ -159,6 +159,49 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hand.current_bet, 500)
         self.assertIn(("poker-room-turn", poker_room.TURN_TIMEOUT_SECONDS), context.job_queue.jobs)
 
+    async def test_admin_close_requires_admin_and_confirmation(self) -> None:
+        context = FakeContext(self.config)
+        user = FakeUser(2, "bob", "Bob")
+        message = FakeMessage("закрыть стол")
+
+        await poker_room_handlers.poker_room_message(FakeUpdate(user, message=message), context)
+
+        self.assertIn("админ", message.reply_texts[0][0].lower())
+
+        admin = FakeUser(1, "alice", "Alice")
+        admin_message = FakeMessage("закрыть стол")
+        await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=admin_message), context)
+
+        button = admin_message.reply_texts[0][1].inline_keyboard[0][0]
+        self.assertEqual(button.callback_data, "pr:admin:close:1")
+
+        query = FakeCallbackQuery(button.callback_data, admin)
+        await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
+
+        room = poker_room_handlers.get_room(context)
+        self.assertFalse(room.is_open)
+        self.assertTrue(self.config.state_path.exists())
+
+    async def test_admin_reset_clears_room_state(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        room.start_hand()
+        context.bot_data["poker_room_render_message_id"] = 123
+        admin = FakeUser(1, "alice", "Alice")
+        message = FakeMessage("сбросить стол")
+
+        await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=message), context)
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
+        query = FakeCallbackQuery(button.callback_data, admin)
+        await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
+
+        reset_room = poker_room_handlers.get_room(context)
+        self.assertEqual(reset_room.seats, {})
+        self.assertIsNone(reset_room.current_hand)
+        self.assertNotIn("poker_room_render_message_id", context.bot_data)
+
 
 if __name__ == "__main__":
     unittest.main()

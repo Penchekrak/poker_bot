@@ -140,6 +140,18 @@ class PokerRoomEngineTests(unittest.TestCase):
         self.assertEqual(hand.apply_timeout(now=1_243.0).kind, "advanced")
         self.assertEqual(hand.street, poker_room.STREET_FLOP)
 
+    def test_closed_room_rejects_new_seats_and_new_hands(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+
+        room.is_open = False
+
+        with self.assertRaises(poker_room.PokerRoomError):
+            room.confirm_room_intent(3, "cara", "Cara", poker_room.ROOM_JOIN, now=1_002.0)
+        with self.assertRaises(poker_room.PokerRoomError):
+            room.start_hand(now=1_010.0)
+
 
 class PokerRoomPersistenceTests(unittest.TestCase):
     def test_json_state_persists_stacks_but_not_active_hand_private_information(self) -> None:
