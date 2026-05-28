@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import poker_room
 
@@ -290,6 +291,39 @@ class HandResolutionTests(unittest.TestCase):
 
 
 class LeaverBetweenHandsTests(unittest.TestCase):
+    def test_reserved_peer_id_can_be_configured_from_env(self) -> None:
+        configured_reserved_id = 123_456_789
+        with patch.dict("os.environ", {"POKER_RESERVED_SEAT_USER_ID": str(configured_reserved_id)}):
+            room = poker_room.PokerRoom(now=1_000.0)
+            for user_id in range(1, poker_room.MAX_SEATS):
+                room.confirm_room_intent(user_id, f"user{user_id}", f"User {user_id}", poker_room.ROOM_JOIN)
+
+            with self.assertRaises(poker_room.SeatLimitError):
+                room.confirm_room_intent(poker_room.RESERVED_SEAT_USER_ID, "old", "Old", poker_room.ROOM_JOIN)
+
+            room.confirm_room_intent(configured_reserved_id, "reserved", "Reserved", poker_room.ROOM_JOIN)
+
+        self.assertIn(configured_reserved_id, room.seats)
+        self.assertNotIn(poker_room.RESERVED_SEAT_USER_ID, room.seats)
+
+    def test_last_open_seat_is_reserved_for_configured_peer(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        for user_id in range(1, poker_room.MAX_SEATS):
+            room.confirm_room_intent(user_id, f"user{user_id}", f"User {user_id}", poker_room.ROOM_JOIN)
+
+        with self.assertRaises(poker_room.SeatLimitError):
+            room.confirm_room_intent(10_001, "extra", "Extra", poker_room.ROOM_JOIN)
+
+        room.confirm_room_intent(
+            poker_room.RESERVED_SEAT_USER_ID,
+            "reserved",
+            "Reserved",
+            poker_room.ROOM_JOIN,
+        )
+
+        self.assertIn(poker_room.RESERVED_SEAT_USER_ID, room.seats)
+        self.assertEqual(len(room.seat_order), poker_room.MAX_SEATS)
+
     def test_leave_intent_removes_seat_when_no_hand_active(self) -> None:
         room = poker_room.PokerRoom(now=1_000.0)
         room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN, now=1_000.0)
@@ -299,6 +333,19 @@ class LeaverBetweenHandsTests(unittest.TestCase):
 
         self.assertNotIn(2, room.seats)
         self.assertEqual(room.seat_order, [1])
+
+    def test_reserved_peer_seat_is_kept_when_leaving_between_hands(self) -> None:
+        room = poker_room.PokerRoom(now=1_000.0)
+        reserved_id = poker_room.RESERVED_SEAT_USER_ID
+        room.confirm_room_intent(reserved_id, "reserved", "Reserved", poker_room.ROOM_JOIN, now=1_000.0)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN, now=1_001.0)
+
+        room.confirm_room_intent(reserved_id, "reserved", "Reserved", poker_room.ROOM_LEAVE, now=1_002.0)
+
+        self.assertIn(reserved_id, room.seats)
+        self.assertEqual(room.seat_order, [reserved_id, 2])
+        self.assertTrue(room.seats[reserved_id].sitting_out)
+        self.assertFalse(room.seats[reserved_id].leave_next_hand)
 
 
 class PokerRoomPersistenceTests(unittest.TestCase):

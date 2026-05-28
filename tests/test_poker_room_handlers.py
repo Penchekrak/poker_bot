@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import time
@@ -242,6 +243,17 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
             30,
         )
 
+    async def test_auto_deal_uses_thirty_second_delay(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+
+        poker_room_handlers._schedule_auto_deal(context)
+
+        self.assertEqual(poker_room.AUTO_DEAL_SECONDS, 30.0)
+        self.assertIn(("poker-room-auto-deal", 30.0), context.job_queue.jobs)
+
     async def test_poker_command_rejects_non_admin(self) -> None:
         context = FakeContext(self.config)
         user = FakeUser(2, "bob", "Bob")
@@ -341,6 +353,39 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rendered)
         self.assertGreaterEqual(len(context.bot.sent_photos), 2)
         self.assertNotEqual(context.bot_data["poker_room_render_message_id"], original_message_id)
+
+    async def test_main_board_caption_writes_empty_board_state_preflop(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand(now=1_000.0)
+
+        caption = poker_room_handlers._caption(hand)
+
+        self.assertIn("Доска: <i>пока пусто</i>", caption)
+
+    async def test_main_board_caption_writes_current_board_cards(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        hand = room.start_hand(
+            now=1_000.0,
+            deck=poker_room.stacked_deck(
+                {
+                    1: ("Ah", "Ad"),
+                    2: ("Kh", "Kd"),
+                    "board": ("2c", "7d", "9h", "Ts", "3c"),
+                }
+            ),
+        )
+        hand.apply_action(hand.to_act_user_id, poker_room.PlayerAction("call"), now=1_001.0)
+        hand.apply_action(hand.to_act_user_id, poker_room.PlayerAction("check"), now=1_002.0)
+
+        caption = poker_room_handlers._caption(hand)
+
+        self.assertIn("Доска: <b>2</b>♣ <b>7</b>♦ <b>9</b>♥", caption)
 
     async def test_current_actor_chat_applies_action_and_schedules_turn_timer(self) -> None:
         context = FakeContext(self.config)
@@ -459,6 +504,20 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Новая раздача", final_text)
         self.assertIn(("poker-room-auto-deal", poker_room.AUTO_DEAL_SECONDS), context.job_queue.jobs)
 
+    async def test_leave_between_hands_cancels_pending_auto_deal_when_room_not_ready(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        poker_room_handlers._schedule_auto_deal(context)
+
+        user = FakeUser(2, "bob", "Bob")
+        query = FakeCallbackQuery(f"pr:confirm:{poker_room.ROOM_LEAVE}:2", user)
+        await poker_room_handlers.poker_room_callback(FakeUpdate(user, query=query), context)
+
+        self.assertNotIn(2, room.seats)
+        self.assertEqual(context.job_queue.get_jobs_by_name(poker_room_handlers.AUTO_DEAL_JOB_NAME), [])
+
     async def test_showdown_final_message_names_winner_hand_category_and_board(self) -> None:
         context = FakeContext(self.config)
         room = poker_room_handlers.get_room(context)
@@ -500,6 +559,40 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(room.seats[1].stack, poker_room.STARTING_STACK)
         self.assertEqual(room.seats[2].stack, poker_room.STARTING_STACK)
         self.assertEqual(sum(seat.stack for seat in room.seats.values()), poker_room.STARTING_STACK * 2)
+
+    async def test_leave_confirmation_waits_for_in_flight_auto_deal_render(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def blocking_send_photo(**kwargs):
+            send_started.set()
+            await release_send.wait()
+            context.bot.sent_photos.append(kwargs)
+            return type("Sent", (), {"message_id": 500})()
+
+        context.bot.send_photo = blocking_send_photo
+
+        deal_task = asyncio.create_task(poker_room_handlers.poker_room_auto_deal_job(context))
+        await asyncio.wait_for(send_started.wait(), timeout=1.0)
+
+        user = FakeUser(2, "bob", "Bob")
+        query = FakeCallbackQuery(f"pr:confirm:{poker_room.ROOM_LEAVE}:2", user)
+        leave_task = asyncio.create_task(poker_room_handlers.poker_room_callback(FakeUpdate(user, query=query), context))
+        await asyncio.sleep(0)
+
+        self.assertFalse(leave_task.done())
+
+        release_send.set()
+        await asyncio.wait_for(deal_task, timeout=1.0)
+        await asyncio.wait_for(leave_task, timeout=1.0)
+
+        self.assertIn(2, room.current_hand.players)
+        self.assertTrue(room.seats[2].leave_next_hand)
+        self.assertTrue(room.seats[2].sitting_out)
 
     async def test_actor_action_after_restart_schedules_new_hand_instead_of_silent_ignore(self) -> None:
         context = FakeContext(self.config)
@@ -642,6 +735,29 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset_room.seats, {})
         self.assertIsNone(reset_room.current_hand)
         self.assertNotIn("poker_room_render_message_id", context.bot_data)
+
+    async def test_admin_reset_keeps_reserved_peer_seat(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        reserved_id = poker_room.RESERVED_SEAT_USER_ID
+        room.confirm_room_intent(reserved_id, "reserved", "Reserved", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        room.start_hand()
+        context.bot_data["poker_room_render_message_id"] = 123
+        admin = FakeUser(1, "alice", "Alice")
+        message = FakeMessage("сбросить стол")
+
+        await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=message), context)
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
+        query = FakeCallbackQuery(button.callback_data, admin)
+        await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
+
+        reset_room = poker_room_handlers.get_room(context)
+        self.assertEqual(reset_room.seat_order, [reserved_id])
+        self.assertIn(reserved_id, reset_room.seats)
+        self.assertTrue(reset_room.seats[reserved_id].sitting_out)
+        self.assertFalse(reset_room.seats[reserved_id].leave_next_hand)
+        self.assertIsNone(reset_room.current_hand)
 
 
 if __name__ == "__main__":

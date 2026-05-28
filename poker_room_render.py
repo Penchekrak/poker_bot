@@ -11,18 +11,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 import poker_room
 
-WIDTH = 1920
-HEIGHT = 1200
+WIDTH = 2400
+HEIGHT = 1500
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "poker_table"
 LATIN_FONT_PATH: Final[Path] = ASSET_DIR / "Minecraft.ttf"
 CYRILLIC_FONT_PATH: Final[Path] = ASSET_DIR / "cyrillic-minecraft-font.ttf"
 FONT_PATH: Final[Path] = CYRILLIC_FONT_PATH
-SEAT_BOX_W: Final[int] = 330
-SEAT_BOX_H: Final[int] = 220
-SEAT_CARD_W: Final[int] = 82
-SEAT_CARD_H: Final[int] = 114
-BOARD_CARD_W: Final[int] = 130
-BOARD_CARD_H: Final[int] = 180
+SEAT_BOX_W: Final[int] = 400
+SEAT_BOX_H: Final[int] = 290
+SEAT_CARD_W: Final[int] = 118
+SEAT_CARD_H: Final[int] = 164
+BOARD_CARD_W: Final[int] = 178
+BOARD_CARD_H: Final[int] = 248
 
 STREET_LABELS_RU: Final[dict[str, str]] = {
     poker_room.STREET_PREFLOP: "ПРЕФЛОП",
@@ -90,9 +90,9 @@ def layout_seat_boxes(count: int, width: int = WIDTH, height: int = HEIGHT) -> d
     box_h = SEAT_BOX_H
     center_x = width // 2
     center_y = height // 2
-    margin = 18
+    margin = 24
     radius_x = width // 2 - box_w // 2 - 30
-    radius_y = height // 2 - box_h // 2 - 24
+    radius_y = height // 2 - box_h // 2 - 20
     boxes: dict[int, Box] = {}
     for index in range(count):
         angle = -math.pi / 2 + (2 * math.pi * index / count)
@@ -111,9 +111,9 @@ def render_table_png(hand: poker_room.PokerHand, path: str | Path) -> RenderResu
     output = Path(path)
     image = Image.new("RGBA", (WIDTH, HEIGHT), "#1f2937ff")
     draw = ImageDraw.Draw(image)
-    font_banner = _font(22)
-    font = _font(24)
-    font_small = _font(18)
+    font_banner = _font(28)
+    font = _font(30)
+    font_small = _font(22)
 
     _draw_table(draw)
     _draw_banner(draw, _status_text(hand), font_banner)
@@ -131,15 +131,15 @@ def render_table_png(hand: poker_room.PokerHand, path: str | Path) -> RenderResu
 
 
 def _draw_table(draw: ImageDraw.ImageDraw) -> None:
-    outer = (142, 180, WIDTH - 142, HEIGHT - 135)
-    inner = (232, 270, WIDTH - 232, HEIGHT - 232)
-    draw.ellipse(outer, fill="#ee6c4d", outline="#172333", width=12)
-    draw.ellipse(inner, fill="#83bfd1", outline="#213243", width=9)
-    draw.ellipse((368, 390, WIDTH - 368, HEIGHT - 352), outline="#5d9fb5", width=6)
+    outer = (178, 225, WIDTH - 178, HEIGHT - 169)
+    inner = (290, 338, WIDTH - 290, HEIGHT - 290)
+    draw.ellipse(outer, fill="#ee6c4d", outline="#172333", width=15)
+    draw.ellipse(inner, fill="#83bfd1", outline="#213243", width=11)
+    draw.ellipse((460, 488, WIDTH - 460, HEIGHT - 440), outline="#5d9fb5", width=8)
 
 
 def _draw_banner(draw: ImageDraw.ImageDraw, text: str, font: TableFont) -> None:
-    box = Box(540, 340, 840, 70)
+    box = Box(675, 395, 1050, 88)
     _pixel_rect(draw, box, "#2f3f54", "#f7f0d6", shadow=True)
     _center_text(draw, box, text, font, "#f7f0d6")
 
@@ -148,12 +148,12 @@ def _draw_action_log(draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font
     log_lines = [line for line in hand.public_log if not _is_board_log_line(line)]
     if not log_lines:
         return
-    y = 425
+    y = 505
     for line in log_lines[-3:]:
         safe = _font_safe(line)
-        truncated = _truncate_to_width(safe, font, 760)
-        _draw_text(draw, (580, y), truncated, font, "#dfe7f5")
-        y += 30
+        truncated = _truncate_to_width(safe, font, 950)
+        _draw_text(draw, (725, y), truncated, font, "#dfe7f5")
+        y += 38
 
 
 def _is_board_log_line(line: str) -> bool:
@@ -165,10 +165,10 @@ def _is_board_log_line(line: str) -> bool:
 
 def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand) -> None:
     card_w, card_h = BOARD_CARD_W, BOARD_CARD_H
-    gap = 18
+    gap = 24
     total = card_w * 5 + gap * 4
     start_x = (WIDTH - total) // 2
-    y = 480
+    y = 625
     cards = list(hand.board)
     while len(cards) < 5:
         cards.append("__back__")
@@ -181,11 +181,11 @@ def _draw_board(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.
 
 
 def _draw_pot(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: TableFont) -> None:
-    pot_box = Box(680, 710, 560, 72)
+    pot_box = Box(850, 910, 700, 90)
     _pixel_rect(draw, pot_box, "#98c7da", "#172333", shadow=True)
-    chip = _asset("ChipRed.png").resize((42, 42), Image.Resampling.NEAREST)
-    image.alpha_composite(chip, (pot_box.x + 24, pot_box.y + 14))
-    image.alpha_composite(chip, (pot_box.right - 66, pot_box.y + 14))
+    chip = _asset("ChipRed.png").resize((52, 52), Image.Resampling.NEAREST)
+    image.alpha_composite(chip, (pot_box.x + 30, pot_box.y + 19))
+    image.alpha_composite(chip, (pot_box.right - 82, pot_box.y + 19))
     if hand.status == poker_room.STATUS_ENDED and hand.pot > 0:
         text = f"БАНК 0   ВЫПЛАЧЕНО {hand.pot}"
     else:
@@ -197,15 +197,15 @@ def _draw_pot(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.Po
 def _draw_side_pots(image: Image.Image, draw: ImageDraw.ImageDraw, hand: poker_room.PokerHand, font: TableFont) -> None:
     if len(hand.side_pots) <= 1:
         return
-    y = 770
-    chip = _asset("ChipBlue.png").resize((28, 28), Image.Resampling.NEAREST)
+    y = 990
+    chip = _asset("ChipBlue.png").resize((35, 35), Image.Resampling.NEAREST)
     for index, pot in enumerate(hand.side_pots, start=1):
-        pot_box = Box(740, y, 440, 38)
+        pot_box = Box(925, y, 550, 48)
         _pixel_rect(draw, pot_box, "#dfe7f5", "#172333")
-        image.alpha_composite(chip, (pot_box.x + 8, pot_box.y + 5))
+        image.alpha_composite(chip, (pot_box.x + 10, pot_box.y + 6))
         label = "ГЛАВНЫЙ БАНК" if index == 1 else f"САЙД ПОТ {index - 1}"
         _center_text(draw, pot_box, f"{label}  {pot.amount}", font, "#172333")
-        y += 42
+        y += 52
 
 
 def _draw_seat(
@@ -227,12 +227,12 @@ def _draw_seat(
         border = "#f0b35a"
     _pixel_rect(draw, box, fill, border, shadow=True)
 
-    name_width = box.w - 24 - (112 if player.street_bet else 0)
+    name_width = box.w - 30 - (140 if player.street_bet else 0)
     name = _fit_text(player.name, font, name_width)
-    _center_text(draw, Box(box.x + 12, box.y + 8, box.w - 24, 36), name, font, "#f7f0d6")
+    _center_text(draw, Box(box.x + 15, box.y + 10, box.w - 30, 45), name, font, "#f7f0d6")
 
-    card_y = box.y + 52
-    card_gap = 12
+    card_y = box.y + 62
+    card_gap = 16
     card_1 = _seat_card_asset(hand, player, 0).resize((SEAT_CARD_W, SEAT_CARD_H), Image.Resampling.NEAREST)
     card_2 = _seat_card_asset(hand, player, 1).resize((SEAT_CARD_W, SEAT_CARD_H), Image.Resampling.NEAREST)
     first_card_x = box.center_x - (SEAT_CARD_W * 2 + card_gap) // 2
@@ -243,13 +243,13 @@ def _draw_seat(
         _draw_fold_overlay(draw, first_card_x, card_y, SEAT_CARD_W, SEAT_CARD_H)
         _draw_fold_overlay(draw, second_card_x, card_y, SEAT_CARD_W, SEAT_CARD_H)
 
-    bottom_label_box = Box(box.x + 16, box.y + box.h - 48, box.w - 32, 36)
+    bottom_label_box = Box(box.x + 20, box.y + box.h - 52, box.w - 40, 40)
     _pixel_rect(draw, bottom_label_box, "#263342", "#f7f0d6")
     bottom_text = _seat_bottom_text(player, hand.status == poker_room.STATUS_ENDED)
     _center_text(draw, bottom_label_box, bottom_text, font_small, "#f7f0d6")
 
     if player.street_bet:
-        bet_box = Box(box.x + box.w - 104, box.y - 18, 116, 42)
+        bet_box = Box(box.x + box.w - 130, box.y - 22, 145, 52)
         _pixel_rect(draw, bet_box, "#f0b35a", "#172333")
         _center_text(draw, bet_box, str(player.street_bet), font_small, "#172333")
 

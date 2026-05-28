@@ -36,9 +36,9 @@ Telegram. Optional webhook settings are `WEBHOOK_LISTEN`, `WEBHOOK_PORT`,
 `WEBHOOK_SECRET_TOKEN`, and `WEBHOOK_DROP_PENDING_UPDATES=1`. For local testing,
 you can also create an untracked `.env` file with these values.
 The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
-`POKER_ROOM_THREAD_ID`, `POKER_ADMIN_USER_IDS`, `POKER_STATE_PATH`,
-`BOT_LOG_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that
-feature is enabled. Logs default to `bot.log`; inspect a deployment with
+`POKER_ROOM_THREAD_ID`, `POKER_ADMIN_USER_IDS`, `POKER_RESERVED_SEAT_USER_ID`,
+`POKER_STATE_PATH`, `BOT_LOG_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and
+`LLM_MODEL` when that feature is enabled. Logs default to `bot.log`; inspect a deployment with
 `tail -f bot.log`.
 
 ## Tests

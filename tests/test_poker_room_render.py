@@ -13,13 +13,16 @@ import poker_room_render
 class PokerRoomRenderTests(unittest.TestCase):
     def make_hand(self, player_count: int) -> poker_room.PokerHand:
         room = poker_room.PokerRoom(now=1_000.0)
-        for user_id in range(1, player_count + 1):
+        user_ids = list(range(1, player_count + 1))
+        if player_count == poker_room.MAX_SEATS:
+            user_ids[-1] = poker_room.RESERVED_SEAT_USER_ID
+        for index, user_id in enumerate(user_ids, start=1):
             room.confirm_room_intent(
                 user_id,
-                f"p{user_id}",
-                f"Player {user_id}",
+                f"p{index}",
+                f"Player {index}",
                 poker_room.ROOM_JOIN,
-                now=1_000.0 + user_id,
+                now=1_000.0 + index,
             )
         return room.start_hand(now=1_100.0)
 
@@ -54,12 +57,21 @@ class PokerRoomRenderTests(unittest.TestCase):
         boxes = list(poker_room_render.layout_seat_boxes(10).values())
 
         for box in boxes:
-            self.assertGreaterEqual(box.w, 320)
-            self.assertGreaterEqual(box.h, 210)
+            self.assertGreaterEqual(box.w, 390)
+            self.assertGreaterEqual(box.h, 280)
             self.assertGreaterEqual(box.x, 0)
             self.assertGreaterEqual(box.y, 0)
             self.assertLessEqual(box.right, poker_room_render.WIDTH)
             self.assertLessEqual(box.bottom, poker_room_render.HEIGHT)
+
+    def test_card_targets_are_large_enough_for_readable_glyphs(self) -> None:
+        self.assertGreaterEqual(poker_room_render.WIDTH, 2400)
+        self.assertGreaterEqual(poker_room_render.HEIGHT, 1500)
+        self.assertGreaterEqual(poker_room_render.SEAT_CARD_H, 160)
+        self.assertGreaterEqual(poker_room_render.BOARD_CARD_H, 240)
+
+        two_card_width = poker_room_render.SEAT_CARD_W * 2 + 16
+        self.assertLessEqual(two_card_width, poker_room_render.SEAT_BOX_W - 40)
 
     def test_render_outputs_nonblank_png_for_table_sizes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,10 +82,10 @@ class PokerRoomRenderTests(unittest.TestCase):
 
                     result = poker_room_render.render_table_png(hand, path)
 
-                    self.assertEqual(result.size, (1920, 1200))
+                    self.assertEqual(result.size, (2400, 1500))
                     self.assertTrue(path.exists())
                     with Image.open(path) as image:
-                        self.assertEqual(image.size, (1920, 1200))
+                        self.assertEqual(image.size, (2400, 1500))
                         colors = image.convert("RGB").getcolors(maxcolors=2_000_000)
                     self.assertIsNotNone(colors)
                     self.assertGreater(len(colors or []), 20)
