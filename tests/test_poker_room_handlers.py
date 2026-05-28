@@ -56,7 +56,6 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent_photos: list[dict] = []
         self.edited_media: list[dict] = []
-        self.sent_messages: list[dict] = []
 
     async def send_photo(self, **kwargs):
         self.sent_photos.append(kwargs)
@@ -64,9 +63,6 @@ class FakeBot:
 
     async def edit_message_media(self, **kwargs):
         self.edited_media.append(kwargs)
-
-    async def send_message(self, **kwargs):
-        self.sent_messages.append(kwargs)
 
 
 class FakeJobQueue:
@@ -127,7 +123,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         await poker_room_handlers.poker_room_message(update, context)
 
-        self.assertIn("подтверди", context.bot.sent_messages[0]["text"].lower())
+        self.assertIn("подтверди", message.reply_texts[0][0].lower())
 
     async def test_join_text_requires_confirmation_then_persists_and_schedules_deal(self) -> None:
         context = FakeContext(self.config)
@@ -136,10 +132,8 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         await poker_room_handlers.poker_room_message(FakeUpdate(user, message=message), context)
 
-        self.assertEqual(context.bot.sent_messages[0]["chat_id"], self.config.chat_id)
-        self.assertNotIn("reply_to_message_id", context.bot.sent_messages[0])
-        self.assertIn("подтверди", context.bot.sent_messages[0]["text"].lower())
-        button = context.bot.sent_messages[0]["reply_markup"].inline_keyboard[0][0]
+        self.assertIn("подтверди", message.reply_texts[0][0].lower())
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
         query = FakeCallbackQuery(button.callback_data, user)
         await poker_room_handlers.poker_room_callback(FakeUpdate(user, query=query), context)
 
@@ -164,8 +158,8 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
             await poker_room_handlers.poker_room_message(FakeUpdate(user, message=message), context)
 
         self.assertEqual(parser.call_args.args[0], "можно я присяду за стол?")
-        self.assertEqual(context.bot.sent_messages[0]["text"], "Подтверди.")
-        button = context.bot.sent_messages[0]["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(message.reply_texts[0][0], "Подтверди.")
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
         self.assertEqual(button.callback_data, "pr:confirm:join:1")
 
     async def test_poker_command_opens_room_for_admin(self) -> None:
@@ -178,7 +172,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         await poker_room_handlers.poker_room_command(FakeUpdate(admin, message=message), context)
 
         self.assertTrue(room.is_open)
-        self.assertEqual(context.bot.sent_messages[-1]["text"], "Стол открыт.")
+        self.assertEqual(message.reply_texts[-1][0], "Стол открыт.")
         self.assertTrue(self.config.state_path.exists())
 
     async def test_poker_command_rejects_non_admin(self) -> None:
@@ -188,7 +182,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         await poker_room_handlers.poker_room_command(FakeUpdate(user, message=message), context)
 
-        self.assertEqual(context.bot.sent_messages[-1]["text"], "Только админ стола.")
+        self.assertEqual(message.reply_texts[-1][0], "Только админ стола.")
 
     async def test_private_cards_callback_returns_only_clicking_players_hand(self) -> None:
         context = FakeContext(self.config)
@@ -233,13 +227,13 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         await poker_room_handlers.poker_room_message(FakeUpdate(user, message=message), context)
 
-        self.assertIn("админ", context.bot.sent_messages[0]["text"].lower())
+        self.assertIn("админ", message.reply_texts[0][0].lower())
 
         admin = FakeUser(1, "alice", "Alice")
         admin_message = FakeMessage("закрыть стол")
         await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=admin_message), context)
 
-        button = context.bot.sent_messages[1]["reply_markup"].inline_keyboard[0][0]
+        button = admin_message.reply_texts[0][1].inline_keyboard[0][0]
         self.assertEqual(button.callback_data, "pr:admin:close:1")
 
         query = FakeCallbackQuery(button.callback_data, admin)
@@ -260,7 +254,7 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage("сбросить стол")
 
         await poker_room_handlers.poker_room_message(FakeUpdate(admin, message=message), context)
-        button = context.bot.sent_messages[0]["reply_markup"].inline_keyboard[0][0]
+        button = message.reply_texts[0][1].inline_keyboard[0][0]
         query = FakeCallbackQuery(button.callback_data, admin)
         await poker_room_handlers.poker_room_callback(FakeUpdate(admin, query=query), context)
 
