@@ -105,6 +105,13 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _apply_due_timeout(context, room)
 
     hand = room.current_hand
+    if hand is None and _room_ready_for_auto_deal(room):
+        _schedule_auto_deal_if_missing(context)
+        parsed_action = poker_room_llm.deterministic_parse(message.text)
+        if parsed_action.kind == "poker_action":
+            await message.reply_text("Раздача сброшена после рестарта. Новая раздача через 15 секунд.")
+            return
+
     if hand and hand.status == poker_room.STATUS_BETTING and hand.to_act_user_id == user.id:
         parsed = poker_room_llm.parse_with_fallback(
             message.text,
@@ -468,6 +475,28 @@ def _schedule_auto_deal(context) -> None:
     for job in job_queue.get_jobs_by_name(AUTO_DEAL_JOB_NAME):
         job.schedule_removal()
     job_queue.run_once(poker_room_auto_deal_job, poker_room.AUTO_DEAL_SECONDS, name=AUTO_DEAL_JOB_NAME)
+
+
+def _schedule_auto_deal_if_missing(context) -> None:
+    job_queue = getattr(context, "job_queue", None)
+    if job_queue is None or job_queue.get_jobs_by_name(AUTO_DEAL_JOB_NAME):
+        return
+    _schedule_auto_deal(context)
+
+
+def _room_ready_for_auto_deal(room: poker_room.PokerRoom) -> bool:
+    if not room.is_open:
+        return False
+    if room.current_hand and room.current_hand.status != poker_room.STATUS_ENDED:
+        return False
+    active = [
+        seat
+        for user_id in room.seat_order
+        if (seat := room.seats.get(user_id)) is not None
+        and not seat.sitting_out
+        and seat.stack > 0
+    ]
+    return len(active) >= 2
 
 
 def _cancel_jobs(context, names: set[str] | None = None) -> None:

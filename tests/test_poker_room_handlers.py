@@ -220,6 +220,19 @@ class PokerRoomHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hand.current_bet, 500)
         self.assertIn(("poker-room-turn", poker_room.TURN_TIMEOUT_SECONDS), context.job_queue.jobs)
 
+    async def test_actor_action_after_restart_schedules_new_hand_instead_of_silent_ignore(self) -> None:
+        context = FakeContext(self.config)
+        room = poker_room_handlers.get_room(context)
+        room.confirm_room_intent(1, "alice", "Alice", poker_room.ROOM_JOIN)
+        room.confirm_room_intent(2, "bob", "Bob", poker_room.ROOM_JOIN)
+        self.assertIsNone(room.current_hand)
+
+        message = FakeMessage("call")
+        await poker_room_handlers.poker_room_message(FakeUpdate(FakeUser(1, "alice", "Alice"), message=message), context)
+
+        self.assertIn("Новая раздача", message.reply_texts[-1][0])
+        self.assertIn(("poker-room-auto-deal", poker_room.AUTO_DEAL_SECONDS), context.job_queue.jobs)
+
     async def test_admin_close_requires_admin_and_confirmation(self) -> None:
         context = FakeContext(self.config)
         user = FakeUser(2, "bob", "Bob")
