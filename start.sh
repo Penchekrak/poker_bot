@@ -3,7 +3,7 @@
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 cd "$(dirname "$0")"
-if [[ -z "${BOT_TOKEN:-}" && -f .env ]]; then
+if [[ -f .env ]]; then
   set -a
   # shellcheck disable=SC1091
   source .env
