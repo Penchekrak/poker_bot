@@ -31,6 +31,17 @@ class FakeUpdate:
     effective_message = FakeMessage()
     callback_query = None
 
+    def to_dict(self):
+        return {
+            "update_id": self.update_id,
+            "message": {
+                "message_id": 10,
+                "chat": {"id": self.effective_chat.id, "type": self.effective_chat.type},
+                "from": {"id": self.effective_user.id},
+                "text": self.effective_message.text,
+            },
+        }
+
 
 class MainLoggingTests(unittest.TestCase):
     def test_update_summary_includes_chat_user_and_text(self) -> None:
@@ -41,6 +52,8 @@ class MainLoggingTests(unittest.TestCase):
         self.assertIn("chat_type=supergroup", summary)
         self.assertIn("user=268887491", summary)
         self.assertIn("text='сяду'", summary)
+        self.assertIn("keys=message,update_id", summary)
+        self.assertIn("payload_message_text='сяду'", summary)
 
     def test_configure_logging_writes_to_configured_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -38,6 +38,33 @@ def update_summary(update: object) -> str:
     user = getattr(update, "effective_user", None)
     message = getattr(update, "effective_message", None)
     callback = getattr(update, "callback_query", None)
+    payload_details = ""
+    try:
+        payload = update.to_dict()  # type: ignore[attr-defined]
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and payload:
+        keys = ",".join(sorted(str(key) for key in payload.keys()))
+        payload_parts = [f"keys={keys}"]
+        for field in ("message", "edited_message", "channel_post", "edited_channel_post", "business_message", "edited_business_message"):
+            raw_message = payload.get(field)
+            if not isinstance(raw_message, dict):
+                continue
+            raw_text = raw_message.get("text") or raw_message.get("caption")
+            raw_thread = raw_message.get("message_thread_id")
+            raw_message_keys = ",".join(sorted(str(key) for key in raw_message.keys()))
+            payload_parts.append(f"payload_{field}_keys={raw_message_keys}")
+            if raw_thread is not None:
+                payload_parts.append(f"payload_{field}_thread={raw_thread}")
+            if raw_text:
+                payload_parts.append(f"payload_{field}_text={str(raw_text)[:160]!r}")
+        if "message_reaction" in payload:
+            payload_parts.append("payload_message_reaction=true")
+        if "my_chat_member" in payload:
+            payload_parts.append("payload_my_chat_member=true")
+        if "chat_member" in payload:
+            payload_parts.append("payload_chat_member=true")
+        payload_details = " " + " ".join(payload_parts)
     text = ""
     if message is not None:
         raw_text = getattr(message, "text", None) or getattr(message, "caption", None)
@@ -54,6 +81,7 @@ def update_summary(update: object) -> str:
         f"user={getattr(user, 'id', None)}"
         f"{text}"
         f"{callback_text}"
+        f"{payload_details}"
     )
 
 
