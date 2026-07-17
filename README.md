@@ -1,13 +1,14 @@
 # Poker Telegram Bot
 
-A Telegram group bot for quick poker hand prompts and a lightweight heads-up
-Texas Hold'em mini-game.
+A Telegram group bot for quick poker hand prompts, a dedicated poker room, and
+lightweight group mini-games.
 
 ## Features
 
 - `/aces_please` deals a random hand and shows cached preflop equity.
 - `/heads_up @username` starts a two-player in-chat Hold'em table.
 - `/blackjack` starts a one-player blackjack table. Each chat can have one active blackjack table.
+- `/liars_bar` (or `/liars`) starts the Russian-language Liar's Bar card mini-game.
 - Mentioning the bot in a group triggers the same random-hand response.
 - A chat-scoped poker room can be enabled with `POKER_ROOM_CHAT_ID`; set
   `POKER_ROOM_THREAD_ID` only when it should be limited to one forum topic.
@@ -40,6 +41,10 @@ The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
 `BOT_LOG_PATH`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` when that
 feature is enabled. Logs default to `bot.log`; inspect a deployment with
 `tail -f bot.log`.
+
+All features use the same `BOT_TOKEN` and bot process. When a dedicated poker
+chat or topic is configured, regular mini-games remain available only outside
+that configured poker chat/topic.
 
 ## Tests
 
