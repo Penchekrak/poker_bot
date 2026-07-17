@@ -96,6 +96,7 @@ class LiarsBarGame:
     winner_user_id: int | None = None
     last_event: str = ""
     cleanup_pending: bool = False
+    public_render_dirty: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     def player(self, user_id: int) -> PlayerState | None:
@@ -106,7 +107,10 @@ class LiarsBarGame:
             return GameResult("not_lobby", "Игра уже началась.")
         existing = self.player(user_id)
         if existing is not None:
-            existing.name = name
+            if existing.name != name:
+                existing.name = name
+                self.updated_at = _coerce_now(now)
+                return GameResult("already_joined", "Имя за столом обновлено.", changed=True)
             return GameResult("already_joined", "Ты уже за столом.")
         if len(self.players) >= MAX_PLAYERS:
             return GameResult("full", "Все четыре места уже заняты.")
@@ -673,7 +677,7 @@ async def liars_bar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         async with game.lock:
-            if game.message_id is not None and message.message_id != game.message_id:
+            if game.message_id is None or message.message_id != game.message_id:
                 await _answer_query(query, "Это старая кнопка.")
                 return
 
@@ -708,11 +712,15 @@ async def liars_bar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await _answer_query(query, "Не понял кнопку.")
                 return
 
+            if result.changed:
+                game.public_render_dirty = True
             try:
                 await _answer_query(query, result.text)
             finally:
-                # Any recognized public action can repair a previously failed edit.
-                await edit_query_message(query, game)
+                # A later public action can repair a previously failed authoritative edit.
+                if game.public_render_dirty:
+                    await edit_query_message(query, game)
+                    game.public_render_dirty = False
     finally:
         # Callback acknowledgements happen before potentially slow expiry edits.
         await _edit_expired_games(expired_games, context)
