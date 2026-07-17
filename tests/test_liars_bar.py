@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from collections import Counter
 
@@ -72,6 +73,18 @@ class FakeMessage:
 
     async def reply_text(self, text: str, reply_markup=None, **kwargs):
         return await self.reply_html(text, reply_markup=reply_markup, **kwargs)
+
+
+class PendingReplyMessage(FakeMessage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reply_started = asyncio.Event()
+        self.release_reply = asyncio.Event()
+
+    async def reply_html(self, text: str, reply_markup=None, **kwargs):
+        self.reply_started.set()
+        await self.release_reply.wait()
+        return await super().reply_html(text, reply_markup=reply_markup, **kwargs)
 
 
 class FakeCallbackQuery:
@@ -468,6 +481,37 @@ class LiarsBarHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(liars_bar.active_game(message.chat_id, message.message_thread_id))
 
+    async def test_stale_callback_is_rejected_while_lobby_message_is_pending(self) -> None:
+        message = PendingReplyMessage()
+        command_task = asyncio.create_task(
+            liars_bar.liars_bar_command(FakeUpdate(self.alice, message=message), self.context)
+        )
+        await message.reply_started.wait()
+        game = liars_bar.active_game(message.chat_id, message.message_thread_id)
+        self.assertIsNotNone(game)
+        self.assertEqual(game.game_id, 1)
+        self.assertIsNone(game.message_id)
+
+        stale_message = FakeMessage(
+            chat_id=game.chat_id,
+            thread_id=game.thread_id,
+            message_id=999,
+        )
+        stale_query = FakeCallbackQuery(f"lb:{game.game_id}:leave", self.alice, stale_message)
+        try:
+            await liars_bar.liars_bar_callback(
+                FakeUpdate(self.alice, query=stale_query),
+                self.context,
+            )
+
+            self.assertTrue(stale_query.answers)
+            self.assertFalse(stale_query.edits)
+            self.assertEqual(game.status, liars_bar.STATUS_LOBBY)
+            self.assertEqual([item.user_id for item in game.players], [self.alice.id])
+        finally:
+            message.release_reply.set()
+            await command_task
+
     async def test_callback_flow_join_start_cards_select_play_and_challenge(self) -> None:
         _, game = await self.command()
         join = callback_data(game.reply_markup(), "join")
@@ -516,6 +560,22 @@ class LiarsBarHandlerTests(unittest.IsolatedAsyncioTestCase):
         stale = await self.press(game, self.bob, "lb:999:join")
         self.assertTrue(stale.answers)
         self.assertEqual(len(game.players), 1)
+
+    async def test_denied_and_noop_public_callbacks_do_not_edit_message(self) -> None:
+        _, game = await self.command()
+        cases = [
+            ("denied cancel", self.bob, callback_data(game.reply_markup(), "cancel")),
+            ("duplicate join", self.alice, callback_data(game.reply_markup(), "join")),
+        ]
+
+        for label, user, data in cases:
+            with self.subTest(label):
+                query = await self.press(game, user, data)
+                self.assertTrue(query.answers)
+                self.assertFalse(query.edits)
+
+        self.assertEqual(game.status, liars_bar.STATUS_LOBBY)
+        self.assertEqual([item.user_id for item in game.players], [self.alice.id])
 
     async def test_failed_start_edit_can_be_retried_from_stale_lobby_controls(self) -> None:
         _, game = await self.command()
