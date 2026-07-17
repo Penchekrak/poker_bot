@@ -42,9 +42,9 @@ The poker room additionally reads `POKER_ROOM_CHAT_ID`, optional
 `LLM_MODEL` when that feature is enabled. Logs default to `bot.log`; inspect a deployment with
 `tail -f bot.log`.
 
-All features use the same `BOT_TOKEN` and bot process. When a dedicated poker
-chat or topic is configured, regular mini-games remain available only outside
-that configured poker chat/topic.
+All features use the same `BOT_TOKEN` and bot process. Liar's Bar is available
+only inside the configured dedicated poker chat/topic. The other regular
+mini-games remain available only outside it.
 
 ## Tests
 
