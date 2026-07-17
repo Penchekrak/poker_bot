@@ -43,6 +43,14 @@ class FakeUpdate:
         }
 
 
+class RecordingApplication:
+    def __init__(self) -> None:
+        self.handlers: list[tuple[object, int]] = []
+
+    def add_handler(self, handler, group: int = 0) -> None:
+        self.handlers.append((handler, group))
+
+
 class PokerRoomIsolationFilterTests(unittest.TestCase):
     def _config(self, chat_id: int = -1003989263256, thread_id: int | None = 77):
         import poker_room_handlers
@@ -78,6 +86,110 @@ class PokerRoomIsolationFilterTests(unittest.TestCase):
         flt = main.build_not_in_poker_room_filter(self._config(chat_id=-1, thread_id=None))
         self.assertFalse(flt.filter(self._message(-1, 0)))
         self.assertFalse(flt.filter(self._message(-1, 99)))
+
+
+class HandlerRegistrationTests(unittest.TestCase):
+    def test_liars_bar_is_registered_without_displacing_poker_room_handlers(self) -> None:
+        app = RecordingApplication()
+        config = main.poker_room_handlers.RoomConfig(
+            chat_id=-1,
+            thread_id=10,
+            admin_user_ids={1},
+            state_path=Path("/tmp/poker-room-state.json"),
+        )
+        wrapped_callbacks = []
+
+        def record_callback_wrapper(callback, callback_config):
+            wrapped_callbacks.append((callback, callback_config))
+            return callback
+
+        with (
+            patch.object(main.poker_room_handlers.RoomConfig, "from_env", return_value=config),
+            patch.object(main, "_wrap_callback_outside_poker_room", side_effect=record_callback_wrapper),
+        ):
+            main.register_handlers(app)
+
+        command_handlers = [
+            handler for handler, _group in app.handlers if isinstance(handler, main.CommandHandler)
+        ]
+        callback_handlers = [
+            handler for handler, _group in app.handlers if isinstance(handler, main.CallbackQueryHandler)
+        ]
+
+        liars_command = next(
+            handler for handler in command_handlers if "liars_bar" in handler.commands
+        )
+        self.assertEqual(liars_command.commands, frozenset({"liars_bar", "liars"}))
+        self.assertIs(liars_command.callback, main.liars_bar_command)
+
+        callbacks_by_pattern = {
+            handler.pattern.pattern: handler
+            for handler in callback_handlers
+            if handler.pattern is not None
+        }
+        self.assertIs(callbacks_by_pattern[r"^lb:"].callback, main.liars_bar_callback)
+        self.assertIn((main.liars_bar_callback, config), wrapped_callbacks)
+
+        poker_command = next(handler for handler in command_handlers if "poker" in handler.commands)
+        self.assertIs(poker_command.callback, main.poker_room_command)
+        self.assertIs(callbacks_by_pattern[main.room_callback_pattern()].callback, main.poker_room_callback)
+        self.assertTrue(
+            any(
+                isinstance(handler, main.MessageHandler)
+                and handler.callback is main.poker_room_message
+                and group == -1
+                for handler, group in app.handlers
+            )
+        )
+
+
+class PokerRoomCallbackIsolationTests(unittest.IsolatedAsyncioTestCase):
+    def _update(self, chat_id: int, thread_id: int | None):
+        message = type(
+            "Message",
+            (),
+            {"chat_id": chat_id, "message_thread_id": thread_id},
+        )()
+
+        class Query:
+            def __init__(self) -> None:
+                self.message = message
+                self.answers = []
+
+            async def answer(self, text: str = "", **kwargs) -> None:
+                self.answers.append((text, kwargs))
+
+        query = Query()
+        return type("Update", (), {"callback_query": query})()
+
+    async def test_wrapper_suppresses_liars_callback_inside_dedicated_poker_topic(self) -> None:
+        config = PokerRoomIsolationFilterTests()._config(chat_id=-1, thread_id=10)
+        calls = []
+
+        async def callback(update, context) -> None:
+            calls.append((update, context))
+
+        wrapped = main._wrap_callback_outside_poker_room(callback, config)
+        update = self._update(-1, 10)
+        await wrapped(update, object())
+
+        self.assertEqual(calls, [])
+        self.assertTrue(update.callback_query.answers)
+
+    async def test_wrapper_forwards_liars_callback_outside_dedicated_poker_topic(self) -> None:
+        config = PokerRoomIsolationFilterTests()._config(chat_id=-1, thread_id=10)
+        calls = []
+
+        async def callback(update, context) -> None:
+            calls.append((update, context))
+
+        wrapped = main._wrap_callback_outside_poker_room(callback, config)
+        update = self._update(-1, 11)
+        context = object()
+        await wrapped(update, context)
+
+        self.assertEqual(calls, [(update, context)])
+        self.assertEqual(update.callback_query.answers, [])
 
 
 class MainLoggingTests(unittest.TestCase):

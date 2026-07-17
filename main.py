@@ -14,6 +14,7 @@ import poker_room_handlers
 from blackjack import blackjack_callback, blackjack_command
 from handlers import aces_command, on_mention
 from heads_up import heads_up_callback, heads_up_command
+from liars_bar import liars_bar_callback, liars_bar_command
 from poker_room_handlers import (
     poker_room_callback,
     poker_room_command,
@@ -130,6 +131,9 @@ def _wrap_callback_outside_poker_room(handler, config):
 
     async def gated(update: Update, context) -> None:
         if _callback_is_in_poker_room(update, config):
+            query = update.callback_query
+            if query is not None:
+                await query.answer("Эта мини-игра недоступна в покерной теме.")
             return
         await handler(update, context)
 
@@ -145,7 +149,10 @@ def _callback_is_in_poker_room(update: Update, config) -> bool:
     message = query.message
     if message is None:
         return False
-    if getattr(message, "chat_id", None) != config.chat_id:
+    chat_id = getattr(message, "chat_id", None)
+    if chat_id is None:
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if chat_id != config.chat_id:
         return False
     if config.thread_id is None:
         return True
@@ -160,12 +167,16 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("aces_please", aces_command, filters=CHAT & not_in_poker_room))
     app.add_handler(CommandHandler("heads_up", heads_up_command, filters=CHAT & not_in_poker_room))
     app.add_handler(CommandHandler("blackjack", blackjack_command, filters=CHAT & not_in_poker_room))
+    app.add_handler(CommandHandler(["liars_bar", "liars"], liars_bar_command, filters=CHAT & not_in_poker_room))
     app.add_handler(CommandHandler("poker", poker_room_command, filters=CHAT))
     app.add_handler(
         CallbackQueryHandler(_wrap_callback_outside_poker_room(heads_up_callback, poker_config), pattern=r"^hu:")
     )
     app.add_handler(
         CallbackQueryHandler(_wrap_callback_outside_poker_room(blackjack_callback, poker_config), pattern=r"^bj:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(_wrap_callback_outside_poker_room(liars_bar_callback, poker_config), pattern=r"^lb:")
     )
     app.add_handler(CallbackQueryHandler(poker_room_callback, pattern=room_callback_pattern()))
     app.add_handler(
