@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
@@ -15,6 +16,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from cards import format_card_html
 import poker_room
 import poker_room_llm
 import poker_room_render
@@ -130,7 +132,8 @@ async def poker_room_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _schedule_auto_deal_if_missing(context)
         parsed_action = poker_room_llm.deterministic_parse(message.text)
         if parsed_action.kind == "poker_action":
-            await message.reply_text("Раздача сброшена после рестарта. Новая раздача через 15 секунд.")
+            delay = int(poker_room.AUTO_DEAL_SECONDS)
+            await message.reply_text(f"Раздача сброшена после рестарта. Новая раздача через {delay} секунд.")
             return
 
     admin_intent = _admin_intent_from_text(message.text)
@@ -201,9 +204,10 @@ async def poker_room_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text("Только админ стола.")
         return
     room = get_room(context)
-    room.is_open = True
-    _save_room(context, room)
-    _schedule_auto_deal(context)
+    async with _room_lock(context):
+        room.is_open = True
+        _save_room(context, room)
+        _schedule_auto_deal(context)
     log.info("Poker room opened by admin user=%s chat=%s", user.id, config.chat_id)
     await message.reply_text("Стол открыт.")
 
@@ -216,7 +220,11 @@ async def poker_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not _allowed_callback(query, config):
         return
+    async with _room_lock(context):
+        await _handle_poker_room_callback(context, config, query, user)
 
+
+async def _handle_poker_room_callback(context, config: RoomConfig, query, user) -> None:
     room = get_room(context)
     parts = query.data.split(":")
     if len(parts) < 2 or parts[0] != CALLBACK_PREFIX:
@@ -317,7 +325,6 @@ async def poker_room_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
     if config is None:
         return
-    room = get_room(context)
     job = getattr(context, "job", None)
     data = getattr(job, "data", None)
     expected_hand_id = None
@@ -333,40 +340,43 @@ async def poker_room_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             expected_to_act_user_id = raw_to_act_user_id
         if isinstance(raw_updated_at, (int, float)):
             expected_updated_at = float(raw_updated_at)
-    await _apply_due_timeout(
-        context,
-        room,
-        force=True,
-        expected_hand_id=expected_hand_id,
-        expected_to_act_user_id=expected_to_act_user_id,
-        expected_updated_at=expected_updated_at,
-    )
+    async with _room_lock(context):
+        room = get_room(context)
+        await _apply_due_timeout(
+            context,
+            room,
+            force=True,
+            expected_hand_id=expected_hand_id,
+            expected_to_act_user_id=expected_to_act_user_id,
+            expected_updated_at=expected_updated_at,
+        )
 
 
 async def poker_room_auto_deal_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    room = get_room(context)
-    if not room.is_open:
-        return
-    if room.current_hand and room.current_hand.status != poker_room.STATUS_ENDED:
-        return
-    snapshot = room.to_public_dict()
-    try:
-        hand = room.start_hand()
-    except poker_room.PokerRoomError:
-        return
-    rendered = await _render_room(context, hand, force_new=True)
-    if not rendered:
-        restored = poker_room.PokerRoom.from_public_dict(snapshot)
-        room.seats = restored.seats
-        room.seat_order = restored.seat_order
-        room.button_user_id = hand.button_user_id
-        room.is_open = restored.is_open
-        room.current_hand = None
-        context.bot_data["poker_room"] = room
-        _save_room(context, room)
-        _schedule_auto_deal(context)
-        return
-    _schedule_turn_timeout(context, hand)
+    async with _room_lock(context):
+        room = get_room(context)
+        if not _room_ready_for_auto_deal(room):
+            _cancel_jobs(context, {AUTO_DEAL_JOB_NAME})
+            return
+        snapshot = room.to_public_dict()
+        try:
+            hand = room.start_hand()
+        except poker_room.PokerRoomError:
+            _cancel_jobs(context, {AUTO_DEAL_JOB_NAME})
+            return
+        rendered = await _render_room(context, hand, force_new=True)
+        if not rendered:
+            restored = poker_room.PokerRoom.from_public_dict(snapshot)
+            room.seats = restored.seats
+            room.seat_order = restored.seat_order
+            room.button_user_id = hand.button_user_id
+            room.is_open = restored.is_open
+            room.current_hand = None
+            context.bot_data["poker_room"] = room
+            _save_room(context, room)
+            _schedule_auto_deal(context)
+            return
+        _schedule_turn_timeout(context, hand)
 
 
 def room_callback_pattern() -> str:
@@ -382,6 +392,14 @@ def _config(context) -> RoomConfig | None:
     if isinstance(configured, RoomConfig):
         return configured
     return RoomConfig.from_env()
+
+
+def _room_lock(context) -> asyncio.Lock:
+    lock = context.bot_data.get("poker_room_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        context.bot_data["poker_room_lock"] = lock
+    return lock
 
 
 def _allowed_message(update: Update, config: RoomConfig) -> bool:
@@ -468,7 +486,21 @@ def _apply_admin_intent(context, room: poker_room.PokerRoom, intent: str) -> str
         _save_room(context, room)
         return "Стол закрыт."
     if intent == ADMIN_RESET:
+        reserved_seat = room.seats.get(poker_room.reserved_seat_user_id())
         reset_room = poker_room.PokerRoom()
+        if reserved_seat is not None:
+            reset_room.seats[reserved_seat.user_id] = poker_room.Seat(
+                user_id=reserved_seat.user_id,
+                username=reserved_seat.username,
+                name=reserved_seat.name,
+                stack=reserved_seat.stack,
+                sitting_out=True,
+                leave_next_hand=False,
+                auto_timeout_count=0,
+                last_rebuy_date=reserved_seat.last_rebuy_date,
+            )
+            reset_room.seat_order.append(reserved_seat.user_id)
+            reset_room.button_user_id = reserved_seat.user_id
         context.bot_data["poker_room"] = reset_room
         context.bot_data.pop("poker_room_render_message_id", None)
         context.bot_data.pop("poker_room_recent_messages", None)
@@ -576,6 +608,7 @@ def _caption(hand: poker_room.PokerHand, commentary: str = "") -> str:
         "<b>Покерный стол</b>",
         f"Банк: <b>{hand.pot}</b>",
         f"Улица: <b>{html.escape(hand.street)}</b>",
+        f"Доска: {_board_caption_html(hand)}",
     ]
     if hand.to_act_user_id:
         lines.append(f"Ход: <b>{html.escape(hand.players[hand.to_act_user_id].name)}</b>")
@@ -584,6 +617,12 @@ def _caption(hand: poker_room.PokerHand, commentary: str = "") -> str:
     if commentary:
         lines.extend(["", f"🎙 {html.escape(commentary)}"])
     return "\n".join(lines)
+
+
+def _board_caption_html(hand: poker_room.PokerHand) -> str:
+    if not hand.board:
+        return "<i>пока пусто</i>"
+    return " ".join(format_card_html(card) for card in hand.board)
 
 
 def _schedule_turn_timeout(context, hand: poker_room.PokerHand) -> None:
@@ -610,7 +649,8 @@ def _schedule_auto_deal(context) -> None:
     if job_queue is None:
         return
     room = context.bot_data.get("poker_room")
-    if isinstance(room, poker_room.PokerRoom) and not room.is_open:
+    if isinstance(room, poker_room.PokerRoom) and not _room_ready_for_auto_deal(room):
+        _cancel_jobs(context, {AUTO_DEAL_JOB_NAME})
         return
     for job in job_queue.get_jobs_by_name(AUTO_DEAL_JOB_NAME):
         job.schedule_removal()

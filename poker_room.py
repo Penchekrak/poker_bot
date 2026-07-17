@@ -20,8 +20,10 @@ STARTING_STACK: Final[int] = 10_000
 SMALL_BLIND: Final[int] = 50
 BIG_BLIND: Final[int] = 100
 MAX_SEATS: Final[int] = 10
+RESERVED_SEAT_USER_ID: Final[int] = 922_489_940
+RESERVED_SEAT_USER_ID_ENV: Final[str] = "POKER_RESERVED_SEAT_USER_ID"
 TURN_TIMEOUT_SECONDS: Final[float] = 120.0
-AUTO_DEAL_SECONDS: Final[float] = 15.0
+AUTO_DEAL_SECONDS: Final[float] = 30.0
 AUTO_SIT_OUT_TIMEOUTS: Final[int] = 2
 
 ROOM_JOIN: Final[str] = "join"
@@ -186,6 +188,11 @@ class PokerRoom:
             return GameResult("room", "Сядешь вне игры со следующей раздачи.")
         if intent == ROOM_LEAVE:
             seat = self._require_seat(user_id)
+            if _is_reserved_seat(user_id):
+                seat.leave_next_hand = False
+                seat.sitting_out = True
+                seat.auto_timeout_count = 0
+                return GameResult("room", "Место сохранено, ситаут включён.")
             seat.leave_next_hand = True
             seat.sitting_out = True
             seat.auto_timeout_count = 0
@@ -287,7 +294,7 @@ class PokerRoom:
             return GameResult("room", "Ты снова в игре.")
         if not self.is_open:
             raise PokerRoomError("стол закрыт")
-        if len(self.seat_order) >= MAX_SEATS:
+        if not self._has_open_seat_for(user_id):
             raise SeatLimitError("стол заполнен")
         self.seats[user_id] = Seat(user_id=user_id, username=username, name=name)
         self.seat_order.append(user_id)
@@ -316,10 +323,23 @@ class PokerRoom:
             if seat is None:
                 continue
             if seat.leave_next_hand and (self.current_hand is None or self.current_hand.status == STATUS_ENDED):
+                if _is_reserved_seat(user_id):
+                    seat.leave_next_hand = False
+                    seat.sitting_out = True
+                    keep.append(user_id)
+                    continue
                 del self.seats[user_id]
                 continue
             keep.append(user_id)
         self.seat_order = keep
+
+    def _has_open_seat_for(self, user_id: int) -> bool:
+        seated_count = sum(1 for seated_user_id in self.seat_order if seated_user_id in self.seats)
+        if seated_count >= MAX_SEATS:
+            return False
+        if _is_reserved_seat(user_id) or reserved_seat_user_id() in self.seats:
+            return True
+        return seated_count < MAX_SEATS - 1
 
 
 @dataclass
@@ -941,3 +961,17 @@ def _coerce_now(now: float | None) -> float:
 
 def _date_key(now: float | None = None) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(_coerce_now(now)))
+
+
+def reserved_seat_user_id() -> int:
+    raw = os.environ.get(RESERVED_SEAT_USER_ID_ENV)
+    if not raw:
+        return RESERVED_SEAT_USER_ID
+    try:
+        return int(raw)
+    except ValueError:
+        return RESERVED_SEAT_USER_ID
+
+
+def _is_reserved_seat(user_id: int) -> bool:
+    return user_id == reserved_seat_user_id()
